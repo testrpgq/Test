@@ -26,7 +26,7 @@
   var INSTANT_FIELDS = [
     'inventory', 'equipped', 'upg', 'skills', 
     'potionLv', 'potionThreshold', 'floor', 'level',
-    'pixr', 'gram', 'bp', 'prem', 'marketUnlocked', 'arenaRating'
+    'pixr', 'gram', 'bp', 'prem', 'marketUnlocked'
   ];
 
   var TG_INIT = '';
@@ -147,7 +147,6 @@
       prem:                clone(G.prem || { tier: null, expiresAt: 0 }),
       boss:                clone(G.boss || { floor: 1, lastFightTime: 0 }),
       marketUnlocked:      G.marketUnlocked || false,
-      arenaRating:         G.arenaRating  || 1000,
       hp:                  G.hp,
       gold:                G.gold,
       xp:                  G.xp,
@@ -238,7 +237,6 @@
     G.boss = d.boss || { floor: 1, lastFightTime: 0 };
     if (!G.boss.floor) G.boss.floor = 1;
     G.marketUnlocked = d.marketUnlocked || false;
-    G.arenaRating = d.arenaRating || 1000;
 
     G.invFilter = d.invFilter || 'all';
     G.dailyTasks = d.dailyTasks || { date: '', seconds: 0, claimed: [] };
@@ -969,58 +967,52 @@ SYNC.booted = true;
 // ═══════════════════════════════════════════════════════
 (function() {
   'use strict';
-
   var _socket  = null;
   var _authed  = false;
   var _roomId  = null;
   var _yourIdx = null;
   var _handlers = {};
+  var _initData = '';
 
   var PVP = window.PvpClient = {
-    // Подключиться и авторизоваться
     connect: function(apiUrl, initData) {
-      if (_socket && _socket.connected) return;
-      _socket = io(apiUrl, { transports: ['websocket','polling'], reconnection: true });
+      _initData = initData;
+      if (_socket && _socket.connected) {
+        // Уже подключены — просто авторизуемся снова
+        _socket.emit('pvp_auth', { initData: _initData });
+        return;
+      }
+      _socket = io(apiUrl, { transports: ['websocket','polling'], reconnection: true, reconnectionDelay: 1000 });
 
       _socket.on('connect', function() {
         _authed = false;
-        _socket.emit('pvp_auth', { initData: initData });
+        _socket.emit('pvp_auth', { initData: _initData });
       });
-
-      _socket.on('pvp_authed',   function() { _authed = true; PVP._fire('authed', {}); });
-      _socket.on('pvp_error',    function(d) { PVP._fire('error', d); });
-      _socket.on('pvp_queued',   function(d) { PVP._fire('queued', d); });
-      _socket.on('pvp_timeout',  function()  { PVP._fire('timeout', {}); });
-      _socket.on('pvp_queue_cancelled', function() { PVP._fire('queue_cancelled', {}); });
-
-      _socket.on('pvp_matched',  function(d) {
-        _roomId  = d.roomId;
-        _yourIdx = d.yourIdx;
-        PVP._fire('matched', d);
-      });
-
-      _socket.on('pvp_tick',           function(d) { PVP._fire('tick',           d); });
-      _socket.on('pvp_skill_used',     function(d) { PVP._fire('skill_used',     d); });
-      _socket.on('pvp_skill_cd',       function(d) { PVP._fire('skill_cd',       d); });
-      _socket.on('pvp_end',            function(d) { _roomId = null; PVP._fire('end', d); });
+      _socket.on('pvp_authed',            function(d) { _authed = true;  PVP._fire('authed', d); });
+      _socket.on('pvp_error',             function(d) { PVP._fire('error', d); });
+      _socket.on('pvp_queued',            function(d) { PVP._fire('queued', d); });
+      _socket.on('pvp_timeout',           function(d) { PVP._fire('timeout', d); });
+      _socket.on('pvp_queue_cancelled',   function(d) { PVP._fire('queue_cancelled', d); });
+      _socket.on('pvp_matched',           function(d) { _roomId = d.roomId; _yourIdx = d.yourIdx; PVP._fire('matched', d); });
+      _socket.on('pvp_tick',              function(d) { PVP._fire('tick', d); });
+      _socket.on('pvp_skill_used',        function(d) { PVP._fire('skill_used', d); });
+      _socket.on('pvp_skill_cd',          function(d) { PVP._fire('skill_cd', d); });
+      _socket.on('pvp_end',               function(d) { _roomId = null; PVP._fire('end', d); });
       _socket.on('pvp_opponent_disconnected', function(d) { PVP._fire('opponent_disconnected', d); });
-      _socket.on('pvp_opponent_reconnected',  function(d) { PVP._fire('opponent_reconnected',  d); });
-      _socket.on('pvp_reconnected',    function(d) { _roomId = d.roomId; _yourIdx = d.yourIdx; PVP._fire('reconnected', d); });
-      _socket.on('disconnect',         function()  { PVP._fire('disconnected', {}); });
+      _socket.on('pvp_opponent_reconnected',  function(d) { PVP._fire('opponent_reconnected', d); });
+      _socket.on('pvp_reconnected',       function(d) { _roomId = d.roomId; _yourIdx = d.yourIdx; PVP._fire('reconnected', d); });
+      _socket.on('disconnect',            function()  { _authed = false; PVP._fire('disconnected', {}); });
     },
-
-    joinQueue:    function(cp) { if (_socket) _socket.emit('pvp_join_queue',  { cp: cp }); },
-    cancelQueue:  function()   { if (_socket) _socket.emit('pvp_cancel_queue', {}); },
-    castSkill:    function(skillId) { if (_socket && _roomId) _socket.emit('pvp_skill', { roomId: _roomId, skillId: skillId }); },
-    surrender:    function()   { if (_socket && _roomId) _socket.emit('pvp_surrender', { roomId: _roomId }); },
-    reconnect:    function()   { if (_socket && _roomId) _socket.emit('pvp_reconnect',  { roomId: _roomId }); },
-
-    on:  function(evt, fn)  { _handlers[evt] = fn; },
-    off: function(evt)      { delete _handlers[evt]; },
-    _fire: function(evt, d) { if (_handlers[evt]) _handlers[evt](d); },
-
-    getRoomId:  function() { return _roomId;  },
-    getYourIdx: function() { return _yourIdx; },
-    isConnected: function() { return _socket && _socket.connected && _authed; },
+    joinQueue:   function(cp)      { if (_socket) _socket.emit('pvp_join_queue',  { cp: cp }); },
+    cancelQueue: function()        { if (_socket) _socket.emit('pvp_cancel_queue', {}); },
+    castSkill:   function(skillId) { if (_socket && _roomId) _socket.emit('pvp_skill',     { roomId: _roomId, skillId: skillId }); },
+    surrender:   function()        { if (_socket && _roomId) _socket.emit('pvp_surrender',  { roomId: _roomId }); },
+    reconnect:   function()        { if (_socket && _roomId) _socket.emit('pvp_reconnect',  { roomId: _roomId }); },
+    on:          function(evt, fn) { _handlers[evt] = fn; },
+    off:         function(evt)     { delete _handlers[evt]; },
+    _fire:       function(evt, d)  { if (_handlers[evt]) _handlers[evt](d); },
+    getRoomId:   function()        { return _roomId; },
+    getYourIdx:  function()        { return _yourIdx; },
+    isConnected: function()        { return !!(_socket && _socket.connected && _authed); },
   };
 })();

@@ -24,8 +24,7 @@ const app    = express();
 const server = http.createServer(app);
 const io     = new Server(server, {
   cors: { origin: '*', methods: ['GET','POST'] },
-  pingTimeout: 20000,
-  pingInterval: 10000,
+  pingTimeout: 20000, pingInterval: 10000,
 });
 const BOT_USERNAME = process.env.BOT_USERNAME || 'YourBotUsername';
 if (!process.env.BOT_USERNAME) console.warn('⚠️  BOT_USERNAME не задан');
@@ -2448,510 +2447,275 @@ server.listen(PORT, () => {
   console.log(`🚀 Server on :${PORT}`);
   console.log(`📊 MongoDB: 5GB, Pool: 50`);
 });
-
 // ═══════════════════════════════════════════════════════
 //  PvP — MATCHMAKING + РЕАЛЬНОЕ ВРЕМЯ (Socket.IO)
 // ═══════════════════════════════════════════════════════
 
-// ── Очередь поиска: Map<tgId, {tgId, name, cp, stats, charId, skills, socket, joinedAt}> ──
 const pvpQueue   = new Map();
-// ── Активные комнаты: Map<roomId, PvpRoom> ──
 const pvpRooms   = new Map();
-// ── tgId → socket ──
 const pvpSockets = new Map();
 
-const PVP_TICK_MS          = 500;   // интервал тика боя
-const PVP_ATK_INTERVAL     = 2.5;   // сек между автоатаками (базовый)
-const PVP_RECONNECT_GRACE  = 60;    // сек ожидания реконнекта
-const PVP_QUEUE_TIMEOUT    = 60;    // сек поиска
-const PVP_WIN_RATING_HIGH  = 20;    // победа над более сильным
-const PVP_WIN_RATING_LOW   = 10;    // победа над более слабым
-const PVP_LOSE_RATING_HIGH = 15;    // проигрыш более слабому
-const PVP_LOSE_RATING_LOW  = 8;     // проигрыш более сильному
-const PVP_REWARD_PIXR      = 1;
+const PVP_TICK_MS         = 500;
+const PVP_ATK_INTERVAL    = 2.5;
+const PVP_RECONNECT_GRACE = 60;
+const PVP_QUEUE_TIMEOUT   = 60;
+const PVP_WIN_HIGH        = 20;
+const PVP_WIN_LOW         = 10;
+const PVP_LOSE_HIGH       = 15;
+const PVP_LOSE_LOW        = 8;
+const PVP_REWARD_PIXR     = 1;
 
-// ── Генерация ID комнаты ──
 function genRoomId() { return 'pvp_' + Date.now() + '_' + Math.random().toString(36).slice(2,6); }
 
-// ── Расчёт урона (те же формулы что в PvE) ──
-function pvpCalcDmg(attackerStats, defenderStats) {
-  var atk  = attackerStats.atk  || 10;
-  var def  = defenderStats.def  || 5;
-  var crit = attackerStats.crit || 5;
-  var critDmg = 1.8 + (attackerStats.critDmg || 0);
-  var dodge = defenderStats.dodge || 3;
-
-  // Уклонение
+function pvpCalcDmg(as, ds) {
+  var dodge = ds.dodge || 3;
   if (Math.random() * 100 < dodge) return { dmg: 0, dodge: true, crit: false };
-
+  var atk = as.atk || 10, def = ds.def || 5;
+  var critDmg = 1.8 + (as.critDmg || 0);
   var dmg = Math.max(1, Math.floor(atk * (0.85 + Math.random() * 0.3) - def * 0.4));
-  var isCrit = Math.random() * 100 < crit;
+  var isCrit = Math.random() * 100 < (as.crit || 5);
   if (isCrit) dmg = Math.floor(dmg * critDmg);
   return { dmg, crit: isCrit, dodge: false };
 }
 
-// ── Применение навыка (серверная сторона) ──
-function pvpApplySkill(skillId, caster, target, skills) {
-  var lv = (skills && skills[skillId] && skills[skillId].level) || 1;
+function pvpApplySkill(skillId, caster, target) {
+  var lv = (caster.skills && caster.skills[skillId] && caster.skills[skillId].level) || 1;
   var as = caster.stats, ds = target.stats;
+  var critDmg = 1.8 + (as.critDmg || 0);
 
-  // fire
-  if (skillId === 'fire_fireball') {
-    var r = pvpCalcDmg(as, ds);
-    var dmg = Math.floor((as.atk || 10) * 2 * (1 + lv * 0.10) * (0.9 + Math.random() * 0.2));
+  if (skillId === 'fire_fireball' || skillId === 'light_smite') {
+    var dmg = Math.max(1, Math.floor((as.atk||10) * 2 * (1 + lv * 0.10) * (0.9 + Math.random() * 0.2) - (ds.def||5) * 0.4));
     var c = Math.random() * 100 < (as.crit||5);
-    if (c) dmg = Math.floor(dmg * (1.8 + (as.critDmg||0)));
+    if (c) dmg = Math.floor(dmg * critDmg);
     target.hp = Math.max(0, target.hp - dmg);
-    return { type: 'dmg', dmg, crit: c, dodge: false };
+    var heal = 0;
+    if (skillId === 'light_smite') { heal = Math.max(1, Math.floor(caster.maxHp * 0.20)); caster.hp = Math.min(caster.maxHp, caster.hp + heal); }
+    return skillId === 'light_smite' ? { type:'smite', dmg, crit:c, heal } : { type:'dmg', dmg, crit:c, dodge:false };
   }
-  if (skillId === 'fire_curse') {
-    target.debuffs = target.debuffs || {};
-    target.debuffs.cursed = { defMult: 1 - (0.30 + (lv-1)*0.03), timer: 30 };
-    return { type: 'debuff', effect: 'curse' };
-  }
-  if (skillId === 'fire_haste') {
-    caster.buffs = caster.buffs || {};
-    caster.buffs.haste = { atkSpdMult: 2.0, timer: 5 + (lv-1)*0.5 };
-    return { type: 'buff', effect: 'haste' };
-  }
-  // light
-  if (skillId === 'light_smite') {
-    var dmg2 = Math.floor((as.atk||10) * 2 * (1 + lv * 0.10) * (0.9 + Math.random() * 0.2));
-    var c2 = Math.random() * 100 < (as.crit||5);
-    if (c2) dmg2 = Math.floor(dmg2 * (1.8 + (as.critDmg||0)));
-    target.hp = Math.max(0, target.hp - dmg2);
-    var heal = Math.max(1, Math.floor(caster.maxHp * 0.20));
-    caster.hp = Math.min(caster.maxHp, caster.hp + heal);
-    return { type: 'smite', dmg: dmg2, crit: c2, heal };
-  }
-  if (skillId === 'light_shield') {
-    caster.buffs = caster.buffs || {};
-    caster.buffs.shield = { defMult: 1 + 0.20 + (lv-1)*0.03, timer: 7 + (lv-1)*0.5 };
-    return { type: 'buff', effect: 'shield' };
-  }
-  if (skillId === 'light_reflect') {
-    caster.buffs = caster.buffs || {};
-    caster.buffs.reflect = { pct: 0.05 + (lv-1)*0.01, timer: 5 + (lv-1)*0.5 };
-    return { type: 'buff', effect: 'reflect' };
-  }
-  // water
+  if (skillId === 'fire_curse')  { target.debuffs.cursed   = { defMult: 1-(0.30+(lv-1)*0.03), timer:30 }; return { type:'debuff', effect:'curse' }; }
+  if (skillId === 'fire_haste')  { caster.buffs.haste       = { atkSpdMult:2.0, timer:5+(lv-1)*0.5 };      return { type:'buff',   effect:'haste' }; }
+  if (skillId === 'light_shield'){ caster.buffs.shield      = { defMult:1.20+(lv-1)*0.03, timer:7+(lv-1)*0.5 }; return { type:'buff', effect:'shield' }; }
+  if (skillId === 'light_reflect'){ caster.buffs.reflect    = { pct:0.05+(lv-1)*0.01, timer:5+(lv-1)*0.5 };  return { type:'buff', effect:'reflect' }; }
   if (skillId === 'water_burst') {
-    var totalDmg = 0;
-    for (var i = 0; i < 3; i++) {
-      var d = Math.max(1, Math.floor((as.atk||10) * (0.85 + Math.random() * 0.3) - (ds.def||5) * 0.4));
-      var cr = Math.random() * 100 < (as.crit||5);
-      if (cr) d = Math.floor(d * (1.8 + (as.critDmg||0)));
-      totalDmg += d;
-    }
-    target.hp = Math.max(0, target.hp - totalDmg);
-    return { type: 'dmg', dmg: totalDmg, crit: false, dodge: false, hits: 3 };
+    var total = 0;
+    for (var i=0;i<3;i++) { var d2=Math.max(1,Math.floor((as.atk||10)*(0.85+Math.random()*0.3)-(ds.def||5)*0.4)); var cr=Math.random()*100<(as.crit||5); if(cr)d2=Math.floor(d2*critDmg); total+=d2; }
+    target.hp = Math.max(0, target.hp - total);
+    return { type:'dmg', dmg:total, crit:false, dodge:false, hits:3 };
   }
-  if (skillId === 'water_critup') {
-    caster.buffs = caster.buffs || {};
-    caster.buffs.critBoost = { flat: 20 + (lv-1)*3, timer: 7 + (lv-1)*0.5 };
-    return { type: 'buff', effect: 'critup' };
-  }
-  if (skillId === 'water_freeze') {
-    target.debuffs = target.debuffs || {};
-    target.debuffs.frozen = { timer: 2 + (lv-1)*0.4 };
-    return { type: 'debuff', effect: 'freeze' };
-  }
+  if (skillId === 'water_critup'){ caster.buffs.critBoost   = { flat:20+(lv-1)*3, timer:7+(lv-1)*0.5 };      return { type:'buff',   effect:'critup' }; }
+  if (skillId === 'water_freeze'){ target.debuffs.frozen    = { timer:2+(lv-1)*0.4 };                         return { type:'debuff', effect:'freeze' }; }
   return null;
 }
 
-// ── Обновление баффов/дебаффов (за тик) ──
-function pvpTickBuffs(fighter, dtSec) {
-  fighter.buffs = fighter.buffs || {};
-  fighter.debuffs = fighter.debuffs || {};
-  Object.keys(fighter.buffs).forEach(function(k) {
-    fighter.buffs[k].timer -= dtSec;
-    if (fighter.buffs[k].timer <= 0) delete fighter.buffs[k];
-  });
-  Object.keys(fighter.debuffs).forEach(function(k) {
-    fighter.debuffs[k].timer -= dtSec;
-    if (fighter.debuffs[k].timer <= 0) delete fighter.debuffs[k];
-  });
+function pvpTickBuffs(f, dt) {
+  Object.keys(f.buffs).forEach(function(k)   { f.buffs[k].timer   -= dt; if (f.buffs[k].timer   <= 0) delete f.buffs[k];   });
+  Object.keys(f.debuffs).forEach(function(k) { f.debuffs[k].timer -= dt; if (f.debuffs[k].timer <= 0) delete f.debuffs[k]; });
 }
 
-// ── Эффективный DEF с баффами ──
-function pvpEffDef(fighter) {
-  var def = fighter.stats.def || 5;
-  if (fighter.buffs && fighter.buffs.shield) def = Math.floor(def * fighter.buffs.shield.defMult);
-  if (fighter.debuffs && fighter.debuffs.cursed) def = Math.floor(def * fighter.debuffs.cursed.defMult);
-  return def;
-}
+function pvpEffDef(f)  { var d=f.stats.def||5; if(f.buffs.shield)d=Math.floor(d*f.buffs.shield.defMult); if(f.debuffs.cursed)d=Math.floor(d*f.debuffs.cursed.defMult); return d; }
+function pvpEffCrit(f) { var c=f.stats.crit||5; if(f.buffs.critBoost)c+=f.buffs.critBoost.flat; return c; }
+function pvpAtkInterval(f) { var s=PVP_ATK_INTERVAL/(f.stats.atkSpd||1.0); if(f.buffs.haste)s/=f.buffs.haste.atkSpdMult; return Math.max(0.5,s); }
 
-// ── Эффективный CRIT с баффами ──
-function pvpEffCrit(fighter) {
-  var crit = fighter.stats.crit || 5;
-  if (fighter.buffs && fighter.buffs.critBoost) crit += fighter.buffs.critBoost.flat;
-  return crit;
-}
-
-// ── Интервал атаки с учётом haste ──
-function pvpAtkInterval(fighter) {
-  var spd = PVP_ATK_INTERVAL / (fighter.stats.atkSpd || 1.0);
-  if (fighter.buffs && fighter.buffs.haste) spd /= fighter.buffs.haste.atkSpdMult;
-  return Math.max(0.5, spd);
-}
-
-// ── Главный тик боя ──
 function pvpTick(room) {
   if (room.finished) return;
-  var dtSec = PVP_TICK_MS / 1000;
+  var dt = PVP_TICK_MS / 1000;
   var a = room.fighters[0], b = room.fighters[1];
-
-  pvpTickBuffs(a, dtSec);
-  pvpTickBuffs(b, dtSec);
-
+  pvpTickBuffs(a, dt); pvpTickBuffs(b, dt);
   var events = [];
 
-  // Автоатака A → B
-  a.atkTimer = (a.atkTimer || 0) + dtSec;
-  if (!(a.debuffs && a.debuffs.frozen) && a.atkTimer >= pvpAtkInterval(a)) {
+  a.atkTimer = (a.atkTimer||0) + dt;
+  if (!a.debuffs.frozen && a.atkTimer >= pvpAtkInterval(a)) {
     a.atkTimer = 0;
-    var atkStats = Object.assign({}, a.stats, { def: pvpEffDef(a), crit: pvpEffCrit(a) });
-    var defStats = Object.assign({}, b.stats, { def: pvpEffDef(b) });
-    var res = pvpCalcDmg(atkStats, defStats);
+    var res = pvpCalcDmg({ atk:a.stats.atk, def:pvpEffDef(a), crit:pvpEffCrit(a), critDmg:a.stats.critDmg, dodge:a.stats.dodge }, { def:pvpEffDef(b), dodge:b.stats.dodge||3 });
     if (!res.dodge) {
       b.hp = Math.max(0, b.hp - res.dmg);
-      // Отражение
-      if (b.buffs && b.buffs.reflect && res.dmg > 0) {
-        var refDmg = Math.floor(res.dmg * b.buffs.reflect.pct);
-        a.hp = Math.max(0, a.hp - refDmg);
-        events.push({ type: 'reflect', from: b.idx, dmg: refDmg });
-      }
+      if (b.buffs.reflect && res.dmg > 0) { var rd=Math.floor(res.dmg*b.buffs.reflect.pct); a.hp=Math.max(0,a.hp-rd); events.push({type:'reflect',from:b.idx,dmg:rd}); }
     }
-    events.push({ type: 'atk', from: a.idx, dmg: res.dmg, crit: res.crit, dodge: res.dodge });
+    events.push({ type:'atk', from:a.idx, dmg:res.dmg, crit:res.crit, dodge:res.dodge });
   }
 
-  // Автоатака B → A
-  b.atkTimer = (b.atkTimer || 0) + dtSec;
-  if (!(b.debuffs && b.debuffs.frozen) && b.atkTimer >= pvpAtkInterval(b)) {
+  b.atkTimer = (b.atkTimer||0) + dt;
+  if (!b.debuffs.frozen && b.atkTimer >= pvpAtkInterval(b)) {
     b.atkTimer = 0;
-    var atkStats2 = Object.assign({}, b.stats, { def: pvpEffDef(b), crit: pvpEffCrit(b) });
-    var defStats2 = Object.assign({}, a.stats, { def: pvpEffDef(a) });
-    var res2 = pvpCalcDmg(atkStats2, defStats2);
+    var res2 = pvpCalcDmg({ atk:b.stats.atk, def:pvpEffDef(b), crit:pvpEffCrit(b), critDmg:b.stats.critDmg, dodge:b.stats.dodge }, { def:pvpEffDef(a), dodge:a.stats.dodge||3 });
     if (!res2.dodge) {
       a.hp = Math.max(0, a.hp - res2.dmg);
-      if (a.buffs && a.buffs.reflect && res2.dmg > 0) {
-        var refDmg2 = Math.floor(res2.dmg * a.buffs.reflect.pct);
-        b.hp = Math.max(0, b.hp - refDmg2);
-        events.push({ type: 'reflect', from: a.idx, dmg: refDmg2 });
-      }
+      if (a.buffs.reflect && res2.dmg > 0) { var rd2=Math.floor(res2.dmg*a.buffs.reflect.pct); b.hp=Math.max(0,b.hp-rd2); events.push({type:'reflect',from:a.idx,dmg:rd2}); }
     }
-    events.push({ type: 'atk', from: b.idx, dmg: res2.dmg, crit: res2.crit, dodge: res2.dodge });
+    events.push({ type:'atk', from:b.idx, dmg:res2.dmg, crit:res2.crit, dodge:res2.dodge });
   }
 
-  // Шлём тик обоим
-  var tickData = {
-    hp:     [a.hp, b.hp],
-    maxHp:  [a.maxHp, b.maxHp],
-    buffs:  [a.buffs, b.buffs],
-    debuffs:[a.debuffs, b.debuffs],
-    events,
-  };
-  io.to(room.roomId).emit('pvp_tick', tickData);
-
-  // Проверяем смерть
-  if (a.hp <= 0 || b.hp <= 0) {
-    var winIdx = a.hp > 0 ? 0 : 1;
-    pvpEndRoom(room, winIdx, 'killed');
-  }
+  io.to(room.roomId).emit('pvp_tick', { hp:[a.hp,b.hp], maxHp:[a.maxHp,b.maxHp], buffs:[a.buffs,b.buffs], debuffs:[a.debuffs,b.debuffs], events });
+  if (a.hp <= 0 || b.hp <= 0) pvpEndRoom(room, a.hp > 0 ? 0 : 1, 'killed');
 }
 
-// ── Завершение боя ──
 async function pvpEndRoom(room, winIdx, reason) {
   if (room.finished) return;
   room.finished = true;
   clearInterval(room.tickInterval);
-
-  var winner = room.fighters[winIdx];
-  var loser  = room.fighters[1 - winIdx];
-
-  // ELO-like рейтинг
-  var winnerRating = winner.arenaRating || 1000;
-  var loserRating  = loser.arenaRating  || 1000;
-  var winGain  = winnerRating >= loserRating ? PVP_WIN_RATING_LOW   : PVP_WIN_RATING_HIGH;
-  var loseLoss = winnerRating >= loserRating ? PVP_LOSE_RATING_HIGH : PVP_LOSE_RATING_LOW;
-
-  var newWinnerRating = winnerRating + winGain;
-  var newLoserRating  = Math.max(0, loserRating - loseLoss);
-
-  io.to(room.roomId).emit('pvp_end', {
-    winnerId:        winner.tgId,
-    reason,
-    winnerRating:    newWinnerRating,
-    loserRating:     newLoserRating,
-    ratingChange:    [winGain, -loseLoss],
-    winnerIdx:       winIdx,
-    pixrReward:      PVP_REWARD_PIXR,
-  });
-
-  // Сохраняем в MongoDB
+  var winner = room.fighters[winIdx], loser = room.fighters[1-winIdx];
+  var wr = winner.arenaRating||1000, lr = loser.arenaRating||1000;
+  var wg = wr >= lr ? PVP_WIN_LOW  : PVP_WIN_HIGH;
+  var ll = wr >= lr ? PVP_LOSE_HIGH: PVP_LOSE_LOW;
+  io.to(room.roomId).emit('pvp_end', { winnerId:winner.tgId, reason, winnerIdx:winIdx, winnerRating:wr+wg, loserRating:Math.max(0,lr-ll), ratingChange:[wg,-ll], pixrReward:PVP_REWARD_PIXR });
   try {
-    await Save.findOneAndUpdate(
-      { tgId: winner.tgId },
-      { $inc: { 'data.pixr': PVP_REWARD_PIXR, 'data.arenaRating': winGain } }
-    );
-    await Save.findOneAndUpdate(
-      { tgId: loser.tgId },
-      { $inc: { 'data.arenaRating': -loseLoss } }
-    );
-  } catch(e) { console.error('❌ [pvp] rating save error:', e.message); }
-
-  console.log(`🏆 [pvp] ${winner.tgId} победил ${loser.tgId}, reason=${reason}`);
+    await Save.findOneAndUpdate({tgId:winner.tgId},{$inc:{'data.pixr':PVP_REWARD_PIXR,'data.arenaRating':wg}});
+    await Save.findOneAndUpdate({tgId:loser.tgId}, {$inc:{'data.arenaRating':-ll}});
+  } catch(e) { console.error('❌ [pvp] rating save:', e.message); }
+  console.log(`🏆 [pvp] ${winner.tgId} победил ${loser.tgId} (${reason})`);
   pvpRooms.delete(room.roomId);
 }
 
-// ── Матчмейкинг — каждые 2 секунды ──
+// Matchmaking каждые 2 секунды
 setInterval(function() {
-  var candidates = Array.from(pvpQueue.values());
   var now = Date.now();
-
-  // Удаляем тех кто ждёт > 60с
-  candidates.forEach(function(p) {
-    if (now - p.joinedAt > PVP_QUEUE_TIMEOUT * 1000) {
+  Array.from(pvpQueue.values()).forEach(function(p) {
+    if (now - p.joinedAt > PVP_QUEUE_TIMEOUT*1000) {
       pvpQueue.delete(p.tgId);
-      var sock = pvpSockets.get(p.tgId);
-      if (sock) sock.emit('pvp_timeout', {});
+      var s = pvpSockets.get(p.tgId);
+      if (s) s.emit('pvp_timeout', {});
     }
   });
-
-  candidates = Array.from(pvpQueue.values());
-  if (candidates.length < 2) return;
-
-  // Подбираем пары по CP ±20%
+  var list = Array.from(pvpQueue.values());
+  if (list.length < 2) return;
   var matched = new Set();
-  for (var i = 0; i < candidates.length; i++) {
-    if (matched.has(candidates[i].tgId)) continue;
-    for (var j = i + 1; j < candidates.length; j++) {
-      if (matched.has(candidates[j].tgId)) continue;
-      var a = candidates[i], b = candidates[j];
-      var cpDiff = Math.abs(a.cp - b.cp) / (Math.max(a.cp, b.cp) || 1);
-      if (cpDiff <= 0.20) {
-        matched.add(a.tgId); matched.add(b.tgId);
-        pvpQueue.delete(a.tgId); pvpQueue.delete(b.tgId);
-        pvpStartRoom(a, b);
+  for (var i=0;i<list.length;i++) {
+    if (matched.has(list[i].tgId)) continue;
+    for (var j=i+1;j<list.length;j++) {
+      if (matched.has(list[j].tgId)) continue;
+      var cpDiff = Math.abs(list[i].cp - list[j].cp) / (Math.max(list[i].cp, list[j].cp)||1);
+      if (cpDiff <= 0.30) {
+        matched.add(list[i].tgId); matched.add(list[j].tgId);
+        pvpQueue.delete(list[i].tgId); pvpQueue.delete(list[j].tgId);
+        pvpStartRoom(list[i], list[j]);
         break;
       }
     }
   }
 }, 2000);
 
-// ── Старт PvP комнаты ──
 function pvpStartRoom(a, b) {
   var roomId = genRoomId();
-  var sockA  = pvpSockets.get(a.tgId);
-  var sockB  = pvpSockets.get(b.tgId);
-  if (!sockA || !sockB) return;
-
-  sockA.join(roomId);
-  sockB.join(roomId);
-
-  var fA = {
-    idx: 0, tgId: a.tgId, name: a.name, charId: a.charId,
-    hp: a.maxHp, maxHp: a.maxHp, stats: a.stats, skills: a.skills,
-    arenaRating: a.arenaRating,
-    buffs: {}, debuffs: {}, atkTimer: 0,
-    cooldowns: {},
-  };
-  var fB = {
-    idx: 1, tgId: b.tgId, name: b.name, charId: b.charId,
-    hp: b.maxHp, maxHp: b.maxHp, stats: b.stats, skills: b.skills,
-    arenaRating: b.arenaRating,
-    buffs: {}, debuffs: {}, atkTimer: 0,
-    cooldowns: {},
-  };
-
-  var room = {
-    roomId, finished: false,
-    fighters: [fA, fB],
-    tgIds: [a.tgId, b.tgId],
-    tickInterval: null,
-    disconnected: {},
-  };
-
-  // Сообщаем игрокам кто против кого (idx = 0 или 1 — это чья ты сторона)
-  sockA.emit('pvp_matched', { roomId, yourIdx: 0, opponent: { name: b.name, charId: b.charId, cp: b.cp, arenaRating: b.arenaRating }, maxHp: [fA.maxHp, fB.maxHp] });
-  sockB.emit('pvp_matched', { roomId, yourIdx: 1, opponent: { name: a.name, charId: a.charId, cp: a.cp, arenaRating: a.arenaRating }, maxHp: [fA.maxHp, fB.maxHp] });
-
+  var sA = pvpSockets.get(a.tgId), sB = pvpSockets.get(b.tgId);
+  if (!sA || !sB) return;
+  sA.join(roomId); sB.join(roomId);
+  var fA = { idx:0, tgId:a.tgId, name:a.name, charId:a.charId, hp:a.maxHp, maxHp:a.maxHp, stats:a.stats, skills:a.skills, arenaRating:a.arenaRating, buffs:{}, debuffs:{}, atkTimer:0, cooldowns:{} };
+  var fB = { idx:1, tgId:b.tgId, name:b.name, charId:b.charId, hp:b.maxHp, maxHp:b.maxHp, stats:b.stats, skills:b.skills, arenaRating:b.arenaRating, buffs:{}, debuffs:{}, atkTimer:0, cooldowns:{} };
+  var room = { roomId, finished:false, fighters:[fA,fB], tgIds:[a.tgId,b.tgId], disconnected:{} };
+  sA.emit('pvp_matched', { roomId, yourIdx:0, opponent:{name:b.name,charId:b.charId,cp:b.cp,arenaRating:b.arenaRating}, maxHp:[fA.maxHp,fB.maxHp] });
+  sB.emit('pvp_matched', { roomId, yourIdx:1, opponent:{name:a.name,charId:a.charId,cp:a.cp,arenaRating:a.arenaRating}, maxHp:[fA.maxHp,fB.maxHp] });
   room.tickInterval = setInterval(function() { pvpTick(room); }, PVP_TICK_MS);
   pvpRooms.set(roomId, room);
-  console.log(`⚔️ [pvp] Бой начался: ${a.tgId} vs ${b.tgId} room=${roomId}`);
+  console.log(`⚔️  [pvp] ${a.tgId} vs ${b.tgId} room=${roomId}`);
 }
 
-// ── Socket.IO события ──
+// Socket.IO
 io.on('connection', function(socket) {
   var myTgId = null;
 
-  // Авторизация через initData
   socket.on('pvp_auth', function(data) {
     try {
-      var tg = verifyTgData(data.initData);
+      // ── ИСПРАВЛЕНО: используем verifyTelegram (не verifyTgData) ──
+      var tg = verifyTelegram(data.initData);
       if (!tg) { socket.emit('pvp_error', { msg: 'auth_failed' }); return; }
       myTgId = String(tg.id);
       pvpSockets.set(myTgId, socket);
       socket.emit('pvp_authed', { tgId: myTgId });
-      console.log(`🔌 [pvp] Авторизован ${myTgId}`);
+      console.log(`🔌 [pvp] authed ${myTgId}`);
     } catch(e) { socket.emit('pvp_error', { msg: 'auth_error' }); }
   });
 
-  // Встать в очередь
   socket.on('pvp_join_queue', async function(data) {
     if (!myTgId) { socket.emit('pvp_error', { msg: 'not_authed' }); return; }
-    if (pvpQueue.has(myTgId)) { socket.emit('pvp_error', { msg: 'already_queued' }); return; }
-
-    // Проверяем — не в бою ли уже
-    for (var [, room] of pvpRooms) {
-      if (room.tgIds.includes(myTgId) && !room.finished) {
-        socket.emit('pvp_error', { msg: 'already_in_battle' }); return;
-      }
+    if (pvpQueue.has(myTgId)) return;
+    for (var [,room] of pvpRooms) {
+      if (!room.finished && room.tgIds.includes(myTgId)) { socket.emit('pvp_error',{msg:'already_in_battle'}); return; }
     }
-
     try {
       var save = await Save.findOne({ tgId: myTgId }).lean();
-      if (!save || !save.data) { socket.emit('pvp_error', { msg: 'no_save' }); return; }
+      if (!save || !save.data) { socket.emit('pvp_error',{msg:'no_save'}); return; }
       var d = save.data;
-      var charId  = (d.char && d.char.id) || (d.charId) || 'fire';
-      var stats   = d.stats || {};
-      var maxHp   = d.maxHp || stats.hp || 100;
-      var cp      = data.cp || 0;
+      var charId = (d.char&&d.char.id) || d.charId || 'fire';
       pvpQueue.set(myTgId, {
-        tgId: myTgId, name: save.firstName || save.username || 'Игрок',
-        cp, charId, stats, maxHp,
+        tgId: myTgId,
+        name: save.firstName || save.username || 'Игрок',
+        cp:   data.cp || 0,
+        charId,
+        stats:  d.stats  || {},
+        maxHp:  d.maxHp  || (d.stats&&d.stats.hp) || 100,
         skills: d.skills || {},
         arenaRating: d.arenaRating || 1000,
         joinedAt: Date.now(),
       });
       socket.emit('pvp_queued', { position: pvpQueue.size });
-      console.log(`🔍 [pvp] ${myTgId} ищет бой, CP=${cp}`);
-    } catch(e) { socket.emit('pvp_error', { msg: 'server_error' }); }
+      console.log(`🔍 [pvp] ${myTgId} в очереди CP=${data.cp}`);
+    } catch(e) { socket.emit('pvp_error',{msg:'server_error'}); }
   });
 
-  // Отмена поиска
-  socket.on('pvp_cancel_queue', function() {
-    if (myTgId) pvpQueue.delete(myTgId);
-    socket.emit('pvp_queue_cancelled', {});
-  });
+  socket.on('pvp_cancel_queue', function() { if(myTgId) pvpQueue.delete(myTgId); socket.emit('pvp_queue_cancelled',{}); });
 
-  // Кастование навыка в бою
   socket.on('pvp_skill', function(data) {
-    if (!myTgId || !data.roomId || !data.skillId) return;
+    if (!myTgId||!data.roomId||!data.skillId) return;
     var room = pvpRooms.get(data.roomId);
-    if (!room || room.finished) return;
+    if (!room||room.finished) return;
     var myIdx = room.tgIds.indexOf(myTgId);
-    if (myIdx === -1) return;
-    var caster = room.fighters[myIdx];
-    var target = room.fighters[1 - myIdx];
-
-    // Кулдаун навыка
-    var now = Date.now();
-    var lastUse = caster.cooldowns[data.skillId] || 0;
-
-    // Получаем базовый кулдаун из дефиниции
-    var charSkills = (typeof SKILLS_DEF !== 'undefined' && SKILLS_DEF[caster.charId]) || [];
-    var skDef = charSkills.find(function(s) { return s.id === data.skillId; });
-    var cdSec = skDef ? skDef.cd : 20;
-    var lv = (caster.skills && caster.skills[data.skillId] && caster.skills[data.skillId].level) || 1;
-    var cdReduction = 1 - Math.min(lv, 5) * 0.05;
-    cdSec = Math.max(5, cdSec * cdReduction);
-
-    if (now - lastUse < cdSec * 1000) {
-      socket.emit('pvp_skill_cd', { skillId: data.skillId, remainMs: cdSec * 1000 - (now - lastUse) });
-      return;
-    }
-
-    // Проверяем — разблокирован ли навык
-    if (!caster.skills || !caster.skills[data.skillId] || !caster.skills[data.skillId].unlocked) {
-      socket.emit('pvp_error', { msg: 'skill_locked' }); return;
-    }
-
+    if (myIdx===-1) return;
+    var caster = room.fighters[myIdx], target = room.fighters[1-myIdx];
+    var now = Date.now(), last = caster.cooldowns[data.skillId]||0;
+    var cdSec = 20;
+    var skillDefs = { fire_fireball:30, fire_curse:20, fire_haste:25, light_smite:30, light_shield:18, light_reflect:22, water_burst:30, water_critup:20, water_freeze:20 };
+    cdSec = skillDefs[data.skillId] || 20;
+    var lv = (caster.skills&&caster.skills[data.skillId]&&caster.skills[data.skillId].level)||1;
+    cdSec = Math.max(5, cdSec*(1-Math.min(lv,5)*0.05));
+    if (now-last < cdSec*1000) { socket.emit('pvp_skill_cd',{skillId:data.skillId}); return; }
+    if (!caster.skills||!caster.skills[data.skillId]||!caster.skills[data.skillId].unlocked) { socket.emit('pvp_error',{msg:'skill_locked'}); return; }
     caster.cooldowns[data.skillId] = now;
-    var result = pvpApplySkill(data.skillId, caster, target, caster.skills);
+    var result = pvpApplySkill(data.skillId, caster, target);
     if (!result) return;
-
-    // Шлём событие навыка обоим
-    io.to(room.roomId).emit('pvp_skill_used', {
-      byIdx:   myIdx,
-      skillId: data.skillId,
-      result,
-      hp:      [room.fighters[0].hp, room.fighters[1].hp],
-    });
-
-    // Проверяем смерть
-    if (room.fighters[0].hp <= 0 || room.fighters[1].hp <= 0) {
-      var winIdx = room.fighters[0].hp > 0 ? 0 : 1;
-      pvpEndRoom(room, winIdx, 'killed');
-    }
+    io.to(room.roomId).emit('pvp_skill_used', { byIdx:myIdx, skillId:data.skillId, result, hp:[room.fighters[0].hp, room.fighters[1].hp] });
+    if (room.fighters[0].hp<=0||room.fighters[1].hp<=0) pvpEndRoom(room, room.fighters[0].hp>0?0:1, 'killed');
   });
 
-  // Сдача
   socket.on('pvp_surrender', function(data) {
-    if (!myTgId || !data.roomId) return;
-    var room = pvpRooms.get(data.roomId);
-    if (!room || room.finished) return;
-    var myIdx = room.tgIds.indexOf(myTgId);
-    if (myIdx === -1) return;
-    pvpEndRoom(room, 1 - myIdx, 'surrender');
+    if (!myTgId||!data.roomId) return;
+    var room=pvpRooms.get(data.roomId);
+    if (!room||room.finished) return;
+    var myIdx=room.tgIds.indexOf(myTgId);
+    if (myIdx===-1) return;
+    pvpEndRoom(room, 1-myIdx, 'surrender');
   });
 
-  // Реконнект
   socket.on('pvp_reconnect', function(data) {
-    if (!myTgId || !data.roomId) return;
-    var room = pvpRooms.get(data.roomId);
-    if (!room || room.finished) return;
+    if (!myTgId||!data.roomId) return;
+    var room=pvpRooms.get(data.roomId);
+    if (!room||room.finished) return;
     pvpSockets.set(myTgId, socket);
     socket.join(data.roomId);
-    if (room.disconnected[myTgId]) {
-      clearTimeout(room.disconnected[myTgId]);
-      delete room.disconnected[myTgId];
-    }
-    var myIdx = room.tgIds.indexOf(myTgId);
-    socket.emit('pvp_reconnected', {
-      roomId: data.roomId, yourIdx: myIdx,
-      hp:    [room.fighters[0].hp, room.fighters[1].hp],
-      maxHp: [room.fighters[0].maxHp, room.fighters[1].maxHp],
-    });
-    io.to(data.roomId).emit('pvp_opponent_reconnected', { idx: myIdx });
+    if (room.disconnected[myTgId]) { clearTimeout(room.disconnected[myTgId]); delete room.disconnected[myTgId]; }
+    var myIdx=room.tgIds.indexOf(myTgId);
+    socket.emit('pvp_reconnected',{roomId:data.roomId,yourIdx:myIdx,hp:[room.fighters[0].hp,room.fighters[1].hp],maxHp:[room.fighters[0].maxHp,room.fighters[1].maxHp]});
+    io.to(data.roomId).emit('pvp_opponent_reconnected',{idx:myIdx});
   });
 
-  // Отключение
   socket.on('disconnect', function() {
     if (!myTgId) return;
     pvpQueue.delete(myTgId);
     pvpSockets.delete(myTgId);
-
-    // Ищем активный бой
     pvpRooms.forEach(function(room) {
-      if (room.finished) return;
-      if (!room.tgIds.includes(myTgId)) return;
-      var myIdx = room.tgIds.indexOf(myTgId);
-      io.to(room.roomId).emit('pvp_opponent_disconnected', { idx: myIdx });
-      // Даём 60 секунд на реконнект
-      room.disconnected[myTgId] = setTimeout(function() {
-        if (!room.finished) pvpEndRoom(room, 1 - myIdx, 'disconnect');
-      }, PVP_RECONNECT_GRACE * 1000);
+      if (room.finished||!room.tgIds.includes(myTgId)) return;
+      var myIdx=room.tgIds.indexOf(myTgId);
+      io.to(room.roomId).emit('pvp_opponent_disconnected',{idx:myIdx});
+      room.disconnected[myTgId]=setTimeout(function(){if(!room.finished)pvpEndRoom(room,1-myIdx,'disconnect');},PVP_RECONNECT_GRACE*1000);
     });
-    console.log(`🔌 [pvp] Отключился ${myTgId}`);
+    console.log(`🔌 [pvp] disconnect ${myTgId}`);
   });
 });
 
-// ── API: рейтинг арены ──
 app.post('/api/pvp/rating', async (req, res) => {
-  const tg = authUser(req, res);
-  if (!tg) return;
+  const tg = authUser(req, res); if (!tg) return;
   try {
-    const top = await Save.find({}, { 'data.arenaRating': 1, firstName: 1, username: 1 })
-      .sort({ 'data.arenaRating': -1 }).limit(50).lean();
-    const me  = await Save.findOne({ tgId: tg.id }, { 'data.arenaRating': 1 }).lean();
-    res.json({
-      ok: true,
-      top: top.map(function(u, i) {
-        return { rank: i+1, name: u.firstName || u.username || 'Игрок', rating: u.data && u.data.arenaRating || 1000 };
-      }),
-      myRating: me && me.data && me.data.arenaRating || 1000,
-    });
-  } catch(e) { res.status(500).json({ ok: false, error: e.message }); }
+    const top = await Save.find({},{'data.arenaRating':1,firstName:1,username:1}).sort({'data.arenaRating':-1}).limit(50).lean();
+    const me  = await Save.findOne({tgId:tg.id},{'data.arenaRating':1}).lean();
+    res.json({ ok:true, top:top.map(function(u,i){return{rank:i+1,name:u.firstName||u.username||'Игрок',rating:u.data&&u.data.arenaRating||1000};}), myRating:me&&me.data&&me.data.arenaRating||1000 });
+  } catch(e) { res.status(500).json({ok:false,error:e.message}); }
 });
-
