@@ -2080,43 +2080,74 @@ app.post('/api/market/my', async (req, res) => {
 // ── Выставить предмет ──
 const _listingLocks = new Set();
 app.post('/api/market/sell', async (req, res) => {
+  console.log('📦 [market/sell] BODY:', req.body);
+  
   const tg = authUser(req, res);
-  if (!tg) return;
-  if (_listingLocks.has(tg.id)) return res.status(429).json({ ok: false, error: 'in_progress' });
+  if (!tg) {
+    console.log('❌ [market/sell] auth failed');
+    return res.status(401).json({ ok: false, error: 'auth_failed' });
+  }
+  
+  if (_listingLocks.has(tg.id)) {
+    return res.status(429).json({ ok: false, error: 'in_progress' });
+  }
   _listingLocks.add(tg.id);
+  
   try {
     const { itemId, price } = req.body || {};
-    if (!itemId || !price || price < 1) return res.status(400).json({ ok: false, error: 'bad_params' });
+    
+    console.log(`📦 [market/sell] itemId=${itemId}, price=${price}, tg=${tg.id}`);
+    
+    // ✅ Проверяем что itemId и price есть
+    if (itemId === undefined || itemId === null || !price || price < 1) {
+      console.log('❌ [market/sell] bad_params:', { itemId, price });
+      return res.status(400).json({ ok: false, error: 'bad_params' });
+    }
 
     const user = await Save.findOne({ tgId: tg.id }).lean();
-    if (!user || !user.data) return res.status(404).json({ ok: false, error: 'no_save' });
-    if (!user.data.marketUnlocked) return res.status(403).json({ ok: false, error: 'market_locked' });
+    if (!user || !user.data) {
+      return res.status(404).json({ ok: false, error: 'no_save' });
+    }
+    
+    if (!user.data.marketUnlocked) {
+      return res.status(403).json({ ok: false, error: 'market_locked' });
+    }
 
-    // Проверяем лимит лотов
-    const activeCount = await MarketListing.countDocuments({ sellerId: tg.id, status: 'active' });
-    if (activeCount >= MARKET_MAX_LOTS) return res.status(400).json({ ok: false, error: 'max_lots' });
+    const activeCount = await MarketListing.countDocuments({ 
+      sellerId: tg.id, 
+      status: 'active' 
+    });
+    if (activeCount >= MARKET_MAX_LOTS) {
+      return res.status(400).json({ ok: false, error: 'max_lots' });
+    }
 
-    // Ищем предмет в инвентаре
     const inventory = user.data.inventory || [];
-    const itemIdx = inventory.findIndex(i => String(i.id) === String(itemId));
-    if (itemIdx === -1) return res.status(400).json({ ok: false, error: 'item_not_found' });
+    // ✅ ИСПРАВЛЕННОЕ СРАВНЕНИЕ
+    const itemIdx = inventory.findIndex(i => Number(i.id) === Number(itemId));
+    if (itemIdx === -1) {
+      console.log(`❌ [market/sell] item not found: ${itemId}`);
+      return res.status(400).json({ ok: false, error: 'item_not_found' });
+    }
 
     const item = inventory[itemIdx];
+    console.log(`✅ [market/sell] item found: ${item.name}`);
 
-    // Нельзя продать common
     if (!item.isSkillBook && !MARKET_MIN_RARITY.includes(item.rarity)) {
       return res.status(400).json({ ok: false, error: 'rarity_too_low' });
     }
-    // Нельзя продать надетое
-    if (item._equipped) return res.status(400).json({ ok: false, error: 'item_equipped' });
+    if (item._equipped) {
+      return res.status(400).json({ ok: false, error: 'item_equipped' });
+    }
 
-    // Атомарно удаляем предмет из инвентаря
+    // Удаляем предмет из инвентаря
     const updated = await Save.findOneAndUpdate(
       { tgId: tg.id, 'data.inventory': { $elemMatch: { id: item.id } } },
       { $pull: { 'data.inventory': { id: item.id } }, $set: { updatedAt: Date.now() } },
       { new: true }
     );
-    if (!updated) return res.status(400).json({ ok: false, error: 'item_not_found' });
+    if (!updated) {
+      return res.status(400).json({ ok: false, error: 'item_not_found' });
+    }
 
     const now = Date.now();
     const listingId = 'lst_' + now + '_' + Math.random().toString(36).substring(2, 6);
@@ -2133,6 +2164,7 @@ app.post('/api/market/sell', async (req, res) => {
 
     console.log(`✅ [market] ${tg.id} выставил ${item.name} за ${price} PIXR`);
     res.json({ ok: true, listing, inventory: updated.data.inventory });
+    
   } catch (e) {
     console.error('❌ [market/sell] error:', e.message);
     res.status(500).json({ ok: false, error: 'server_error' });
