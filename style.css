@@ -1346,7 +1346,7 @@ html, body {
    ══════════════════════════════════ */
 .market-hud-btn {
   position: absolute; z-index: 52;
-  left: 8px; top: 56px;
+  right: 60px; top: 56px;
   width: 44px; height: 36px;
   border-radius: 8px;
   background: rgba(0,15,10,0.88);
@@ -1542,3 +1542,114 @@ html, body {
   padding: 20px;
   box-shadow: 0 0 40px rgba(255,215,0,0.25);
 }
+
+/* ══════════════════════════════════
+   PvP — HUD кнопка
+   ══════════════════════════════════ */
+.pvp-hud-btn {
+  position: absolute; z-index: 52;
+  right: 60px; top: 100px;
+  width: 44px; height: 36px;
+  border-radius: 8px;
+  background: rgba(5,5,20,0.90);
+  border: 1.5px solid rgba(160,100,255,0.6);
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 2px; cursor: pointer;
+  box-shadow: 0 0 10px rgba(160,100,255,0.3);
+}
+.pvp-hud-btn:active { transform: scale(0.9); }
+.pvp-hud-label { font-size: 7px; font-weight: bold; color: #a064ff; letter-spacing: 0.5px; line-height: 1; font-family: 'Courier New', monospace; }
+
+/* ══════════════════════════════════
+   PvP — Оверлей поиска
+   ══════════════════════════════════ */
+.pvp-search-overlay {
+  position: fixed; inset: 0; z-index: 350;
+  background: rgba(0,0,0,0.88);
+  display: flex; align-items: center; justify-content: center;
+}
+.pvp-search-overlay.hidden { display: none; }
+.pvp-search-box {
+  background: #080814;
+  border: 1.5px solid rgba(160,100,255,0.4);
+  border-radius: 14px;
+  width: 90%; max-width: 300px;
+  padding: 24px 18px; text-align: center;
+}
+.pvp-search-title { font-size: 14px; font-weight: bold; color: #a064ff; font-family: 'Courier New', monospace; letter-spacing: 1px; margin-bottom: 16px; }
+.pvp-search-anim  { font-size: 36px; margin-bottom: 12px; animation: pvpSpin 1.5s linear infinite; display: inline-block; }
+@keyframes pvpSpin { 0%{transform:rotate(0deg)} 100%{transform:rotate(360deg)} }
+.pvp-search-timer { font-size: 13px; color: #a064ff; font-family: 'Courier New', monospace; margin-bottom: 6px; }
+.pvp-search-cp    { font-size: 11px; color: #556; margin-bottom: 18px; }
+.pvp-cancel-btn {
+  padding: 9px 24px; font-size: 11px; font-family: 'Courier New', monospace;
+  border-radius: 8px; border: 1.5px solid #334;
+  background: rgba(255,255,255,0.03); color: #556; cursor: pointer;
+}
+.pvp-cancel-btn:active { color: #fff; border-color: #888; }
+
+/* ══════════════════════════════════
+   PvP — Боевой оверлей
+   ══════════════════════════════════ */
+.pvp-battle-overlay {
+  position: fixed; inset: 0; z-index: 340; pointer-events: none;
+}
+.pvp-battle-overlay.hidden { display: none; }
+.pvp-skills-bar {
+  position: absolute; bottom: 0; left: 0; right: 0;
+  display: flex; align-items: center; justify-content: center;
+  gap: 10px; padding: 10px 0 14px;
+  background: linear-gradient(to top, rgba(0,0,0,0.7), transparent);
+  pointer-events: all;
+}
+.pvp-skill-btn {
+  width: 54px; height: 54px; border-radius: 10px;
+  border: 2px solid rgba(160,100,255,0.5);
+  background: rgba(10,5,20,0.85);
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  cursor: pointer; position: relative; overflow: hidden; gap: 2px;
+}
+.pvp-skill-btn:active { transform: scale(0.92); }
+.pvp-skill-btn.oncd   { border-color: rgba(100,100,100,0.4); }
+.pvp-skill-btn.ready  { border-color: #a064ff; box-shadow: 0 0 8px rgba(160,100,255,0.4); }
+.pvp-surrender-btn {
+  position: absolute; top: 12px; right: 12px;
+  padding: 5px 10px; font-size: 10px;
+  font-family: 'Courier New', monospace; border-radius: 6px;
+  border: 1px solid rgba(231,76,60,0.4); background: rgba(231,76,60,0.08);
+  color: #e74c3c; cursor: pointer; pointer-events: all;
+}
+.pvp-surrender-btn:active { background: rgba(231,76,60,0.2); }
+.pvp-status-badge {
+  position: absolute; top: 40px; left: 50%; transform: translateX(-50%);
+  font-size: 10px; color: #778; font-family: 'Courier New', monospace;
+  background: rgba(0,0,0,0.6); padding: 3px 10px; border-radius: 20px;
+  pointer-events: none;
+}
+
+/* ══════════════════════════════════
+   PvP — Результат
+   ══════════════════════════════════ */
+.pvp-result-modal {
+  position: fixed; inset: 0; z-index: 400;
+  background: rgba(0,0,0,0.88);
+  display: flex; align-items: center; justify-content: center; padding: 20px;
+}
+.pvp-result-modal.hidden { display: none; }
+.pvp-result-box {
+  background: #0d0d1f; border-radius: 16px;
+  width: 100%; max-width: 300px; padding: 22px 18px; text-align: center;
+}
+.pvp-result-icon  { font-size: 48px; margin-bottom: 8px; }
+.pvp-result-title { font-size: 20px; font-weight: bold; font-family: 'Courier New', monospace; margin-bottom: 4px; }
+.pvp-result-sub   { font-size: 11px; color: #556; margin-bottom: 16px; }
+.pvp-result-stats { background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.07); border-radius: 10px; padding: 12px; margin-bottom: 16px; }
+.pvp-result-row   { display: flex; justify-content: space-between; font-size: 12px; font-family: 'Courier New', monospace; margin-bottom: 6px; }
+.pvp-result-row:last-child { margin-bottom: 0; }
+.pvp-result-close {
+  width: 100%; padding: 11px; font-size: 12px;
+  font-family: 'Courier New', monospace; border-radius: 8px;
+  border: 1.5px solid #334; background: rgba(255,255,255,0.03);
+  color: #aaa; cursor: pointer;
+}
+.pvp-result-close:active { color: #fff; }

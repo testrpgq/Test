@@ -8,9 +8,6 @@
   ══════════════════════════════════════════════════════
 */
 
-// ═══════════════════════════════
-//  ВКЛАДКА УЛУЧШЕНИЙ
-// ═══════════════════════════════
 // ── Кеш аватаров (чтобы не спамить 404 запросами) ──
 var _avatarFailedCache = {};
 
@@ -27,20 +24,33 @@ function onAvatarError(img, tgId, fallbackHtml) {
   img.parentElement.style.cssText += ';display:flex;align-items:center;justify-content:center;font-size:16px;';
 }
 
- // 'stats' | 'skills'
+// ═══════════════════════════════
+//  ВКЛАДКА УЛУЧШЕНИЙ
+// ═══════════════════════════════
+var _upgTab = 'stats'; // 'stats' | 'skills'
 function setUpgTab(t) { _upgTab = t; renderUpgrades(); }
 
 function upgCost(u) {
-  const lv = Math.min(G.upg[u.id], 10);
-  return Math.floor(u.baseCost * Math.pow(1.6, lv));
+  const lv = G.upg[u.id] || 0;
+  if (u.currency === 'pixr') return { gold: 0, pixr: u.baseCost };
+  const goldCost = Math.floor(u.baseCost * Math.pow(1.6, lv));
+  const pixrCost = lv >= 15 ? (lv - 14) : 0;
+  return { gold: goldCost, pixr: pixrCost };
 }
 
 function buyUpgrade(u) {
-  if (G.upg[u.id] >= u.maxLv) return;
+  if ((G.upg[u.id] || 0) >= u.maxLv) return;
   const cost = upgCost(u);
-  if (G.gold < cost) { flashRed(); return; }
-  G.gold -= cost;
-  G.upg[u.id]++;
+  if (u.currency === 'pixr') {
+    if ((G.pixr || 0) < cost.pixr) { flashRed(); return; }
+    G.pixr -= cost.pixr;
+  } else {
+    if (G.gold < cost.gold) { flashRed(); return; }
+    if ((G.pixr || 0) < cost.pixr) { flashRed(); return; }
+    G.gold -= cost.gold;
+    G.pixr = (G.pixr || 0) - cost.pixr;
+  }
+  G.upg[u.id] = (G.upg[u.id] || 0) + 1;
   G.baseStats[u.stat] = parseFloat(((G.baseStats[u.stat] || 0) + u.bonus).toFixed(4));
   recalcStats(); updateHUD(); renderUpgrades();
 }
@@ -71,20 +81,31 @@ function renderUpgrades() {
     ${swordSvg} <span>CP: <span style="color:#fa0;font-weight:bold">${cp}</span></span>
     <span style="color:#2a2a5a;margin:0 2px">|</span>
     ${coinSvg} <span>Золото: <span style="color:#f5c542;font-weight:bold">${G.gold}</span></span>
+    <span style="color:#2a2a5a;margin:0 2px">|</span>
+    <img src="images/pixr.png" style="width:13px;height:13px;image-rendering:pixelated;vertical-align:middle;"> <span>PIXR: <span style="color:#ff44cc;font-weight:bold">${G.pixr || 0}</span></span>
   </div>`;
 
   // ── Характеристики ──
   if (_upgTab === 'stats') {
     body.innerHTML = header + tabBar + UPG_DEFS.map(u => {
-      const lv = G.upg[u.id], maxLv = u.maxLv;
-      const cost    = lv < maxLv ? upgCost(u) : '-';
+      const lv = G.upg[u.id] || 0, maxLv = u.maxLv;
+      const cost    = lv < maxLv ? upgCost(u) : null;
       const pct     = (lv / maxLv * 100) + '%';
       const statVal = u.id === 'atkSpd'
         ? G.stats.atkSpd.toFixed(2) + 'x (' + getAtkCooldown().toFixed(1) + 's)'
-        : G.stats[u.stat];
-      const btnContent = lv >= maxLv
-        ? 'MAX'
-        : `<span style="display:flex;align-items:center;gap:3px;justify-content:center;">${coinSvg}<span>${cost}</span></span>`;
+        : u.id === 'critDmg'
+          ? effectiveCritDmg().toFixed(1) + 'x'
+          : G.stats[u.stat];
+      let btnContent;
+      if (lv >= maxLv) {
+        btnContent = 'MAX';
+      } else if (u.currency === 'pixr') {
+        btnContent = `<span style="display:flex;align-items:center;gap:3px;justify-content:center;"><img src="images/pixr.png" style="width:13px;height:13px;image-rendering:pixelated;vertical-align:middle;"><span>${cost.pixr}</span></span>`;
+      } else if (cost.pixr > 0) {
+        btnContent = `<span style="display:flex;align-items:center;gap:4px;justify-content:center;">${coinSvg}<span>${cost.gold}</span><span style="color:#444">+</span><img src="images/pixr.png" style="width:13px;height:13px;image-rendering:pixelated;vertical-align:middle;"><span style="color:#ff44cc">${cost.pixr}</span></span>`;
+      } else {
+        btnContent = `<span style="display:flex;align-items:center;gap:3px;justify-content:center;">${coinSvg}<span>${cost.gold}</span></span>`;
+      }
       return `<div class="upg-item">
         <div class="upg-icon">${upgIcon(u.svgId)}</div>
         <div class="upg-info">
@@ -112,7 +133,7 @@ function renderUpgrades() {
   var totalBooks = G.inventory.filter(function(i){ return i.isSkillBook; }).length;
   var booksInfo  = '<div style="font-size:10px;color:#778;margin-bottom:10px;padding:6px 10px;background:rgba(167,139,250,0.06);border:1px solid #3a2a6a;border-radius:6px;display:flex;align-items:center;gap:6px;">' +
     '<span style="font-size:16px">📖</span><span>Книг в инвентаре: <strong style="color:#a78bfa">' + totalBooks + '</strong></span>' +
-    '<span style="color:#445;font-size:9px;margin-left:auto">Шанс: ~1%</span></div>';
+    '<span style="color:#445;font-size:9px;margin-left:auto">Шанс: ~' + ((0.000267 + (G.floor - 1) * 0.0000333) * 100).toFixed(4) + '% / убийство</span></div>';
 
   var skillsHtml = skills.map(function(sk) {
     var st      = getSkillState(sk.id);
@@ -167,32 +188,62 @@ function openFloorLoot(floorN) {
   var rarityNames  = { common:'Обычный', uncommon:'Необычный', rare:'Редкий', epic:'Эпический', legend:'Легендарный' };
   var classColors  = { fire:'#ff7030', light:'#ffd040', water:'#40d0ff' };
   var classLabels  = { fire:'Пирокан', light:'Люмос', water:'Аквас' };
-  var html = '<div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;">' +
+  var maxRarityMap = { 1:'common', 2:'uncommon', 3:'uncommon', 4:'rare', 5:'rare', 6:'rare', 7:'epic', 8:'epic', 9:'legend', 10:'legend' };
+  var minRarityMap = { 1:'common', 2:'common', 3:'common', 4:'common', 5:'common', 6:'common', 7:'common', 8:'uncommon', 9:'uncommon', 10:'uncommon' };
+  var minR = minRarityMap[f.n] || 'common';
+  var maxR = maxRarityMap[f.n] || 'legend';
+  var minCol = rarityColors[minR], maxCol = rarityColors[maxR];
+
+  var realItemChance = ((0.00833 + (f.n - 1) * 0.00167) * 100).toFixed(2);
+  var realBookChance = ((0.000267 + (f.n - 1) * 0.0000333) * 100).toFixed(4);
+  var pixrChance     = (0.02 * Math.pow(1.5, f.n - 1)).toFixed(3);
+
+  var html = '<div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">' +
     '<span style="font-size:28px">' + f.emoji + '</span>' +
     '<div><div style="font-size:15px;font-weight:bold;color:#f5c542;">Этаж ' + f.n + ': ' + f.name + '</div>' +
-    '<div style="font-size:10px;color:#778;margin-top:2px;">Таблица дропа предметов</div></div></div>' +
-    '<div style="font-size:9px;color:#556;letter-spacing:1px;margin-bottom:8px;">ПРЕДМЕТЫ</div>';
+    '<div style="font-size:10px;color:#778;margin-top:2px;">Дроп за убийство: <span style="color:#f5c542;">' + realItemChance + '%</span> · Редкость: ' +
+    '<span style="color:' + minCol + ';">' + rarityNames[minR] + '</span>' +
+    ' — <span style="color:' + maxCol + ';">' + rarityNames[maxR] + '</span></div></div></div>';
+
   if (f.loot && f.loot.length) {
+    var totalWeight = f.loot.reduce(function(s, i) { return s + i.chance; }, 0);
     f.loot.forEach(function(item) {
-      var col = rarityColors[item.rarity] || '#888';
-      var rname = rarityNames[item.rarity] || item.rarity;
+      var col    = rarityColors[item.rarity] || '#888';
+      var rname  = rarityNames[item.rarity]  || item.rarity;
       var iconSrc = itemIcon(item.slot, item.rarity, item.forClass || null);
+      var realChance = ((item.chance / totalWeight) * parseFloat(realItemChance)).toFixed(2);
       html += '<div class="loot-row"><img src="' + iconSrc + '" style="width:24px;height:24px;object-fit:contain;image-rendering:pixelated;margin-right:8px;vertical-align:middle;" onerror="this.style.opacity=0">';
       html += '<span style="flex:1;color:#ddd;">' + item.name;
-      if (item.forClass) html += ' <span style="font-size:9px;color:' + (classColors[item.forClass]||'#aaa') + ';border:1px solid ' + (classColors[item.forClass]||'#aaa') + ';padding:1px 5px;border-radius:3px;">' + (classLabels[item.forClass]||item.forClass) + '</span>';
+      if (item.forClass) html += ' <span style="font-size:9px;color:' + (classColors[item.forClass]||'#aaa') + ';border:1px solid ' + (classColors[item.forClass]||'#aaa') + ';padding:1px 4px;border-radius:3px;">' + (classLabels[item.forClass]||item.forClass) + '</span>';
       html += '</span><span class="loot-rarity-badge" style="color:' + col + ';border-color:' + col + ';margin-right:8px;">' + rname + '</span>';
-      html += '<span style="color:#f5c542;font-weight:bold;min-width:34px;text-align:right;">' + item.chance + '%</span></div>';
+      html += '<span style="color:#f5c542;font-weight:bold;min-width:38px;text-align:right;">' + realChance + '%</span></div>';
     });
-    var pixrChance = (0.3 * Math.pow(1.5, f.n - 1)).toFixed(2);
-    html += '<div class="loot-row"><img src="images/pixr.png" style="width:24px;height:24px;object-fit:contain;image-rendering:pixelated;margin-right:8px;vertical-align:middle;" onerror="this.style.opacity=0">';
-    html += '<span style="flex:1;color:#ff44cc;">PIXR</span>';
-    html += '<span class="loot-rarity-badge" style="color:#ff44cc;border-color:#ff44cc;margin-right:8px;">Монетка</span>';
-    html += '<span style="color:#f5c542;font-weight:bold;min-width:34px;text-align:right;">' + pixrChance + '%</span></div>';
   } else {
     html += '<div style="color:#445;font-size:11px;text-align:center;padding:20px 0;">Нет данных о дропе</div>';
   }
-  html += '<div style="margin-top:14px;font-size:9px;color:#445;text-align:center;">Шанс выпадения — вероятность относительно других предметов этажа</div>';
-  html += '<button onclick="closeFloorLootModal()" style="width:100%;margin-top:14px;padding:10px;font-size:12px;font-family:Courier New,monospace;border-radius:8px;border:1.5px solid #2a2a5a;background:rgba(255,255,255,0.04);color:#778;cursor:pointer;">Закрыть</button>';
+
+  // PIXR
+  html += '<div class="loot-row"><img src="images/pixr.png" style="width:24px;height:24px;object-fit:contain;image-rendering:pixelated;margin-right:8px;vertical-align:middle;" onerror="this.style.opacity=0">';
+  html += '<span style="flex:1;color:#ff44cc;">PIXR монетка</span>';
+  html += '<span class="loot-rarity-badge" style="color:#ff44cc;border-color:#ff44cc;margin-right:8px;">Валюта</span>';
+  html += '<span style="color:#f5c542;font-weight:bold;min-width:38px;text-align:right;">' + pixrChance + '%</span></div>';
+
+  // Книги по классам
+  var bookClasses = [
+    { id:'fire',  label:'Пирокан', color:'#ff7030', skills:'Огн. шар, Проклятие, Ярость' },
+    { id:'light', label:'Люмос',   color:'#ffd040', skills:'Кара света, Щит света, Отражение' },
+    { id:'water', label:'Аквас',   color:'#40d0ff', skills:'Тройной удар, Концентрация, Заморозка' },
+  ];
+  bookClasses.forEach(function(bc) {
+    html += '<div class="loot-row"><span style="font-size:20px;margin-right:8px;">📖</span>';
+    html += '<span style="flex:1;color:#b88cf8;">Книга навыка <span style="font-size:9px;color:' + bc.color + ';border:1px solid ' + bc.color + ';padding:1px 4px;border-radius:3px;">' + bc.label + '</span>';
+    html += ' <span style="font-size:9px;color:#556;">(' + bc.skills + ')</span></span>';
+    html += '<span class="loot-rarity-badge" style="color:#9b59b6;border-color:#9b59b6;margin-right:8px;">Эпический</span>';
+    html += '<span style="color:#f5c542;font-weight:bold;min-width:38px;text-align:right;">' + realBookChance + '%</span></div>';
+  });
+
+  html += '<div style="margin-top:10px;font-size:9px;color:#445;text-align:center;">% — шанс выпадения за каждое убийство</div>';
+  html += '<button onclick="closeFloorLootModal()" style="width:100%;margin-top:12px;padding:10px;font-size:12px;font-family:Courier New,monospace;border-radius:8px;border:1.5px solid #2a2a5a;background:rgba(255,255,255,0.04);color:#778;cursor:pointer;">Закрыть</button>';
   document.getElementById('floorLootContent').innerHTML = html;
   document.getElementById('floorLootModal').classList.add('show');
 }
@@ -218,9 +269,9 @@ function renderFloors() {
     var allXp = f.baseXp.map(function(xp) { return Math.round(xp * f.xpMult); });
     var allGold = f.baseGold.map(function(gold) { return Math.round(gold * f.goldMult); });
     
-    var avgXp   = Math.round(allXp.reduce(function(a,b){return a+b;},0) / allXp.length);
+    var avgXp   = Math.round(Math.min.apply(null, allXp));
     var maxXp   = Math.round(Math.max.apply(null, allXp));
-    var avgGold = Math.round(allGold.reduce(function(a,b){return a+b;},0) / allGold.length);
+    var avgGold = Math.round(Math.min.apply(null, allGold));
     var maxGold = Math.round(Math.max.apply(null, allGold));
     
     var cpLeft  = f.cpReq - cp;
@@ -279,10 +330,7 @@ function goToFloor(n) {
 // ═══════════════════════════════
 //  ВКЛАДКА РЕЙТИНГА (исправленная)
 // ═══════════════════════════════
-// ═══════════════════════════════
-//  ПЕРЕМЕННЫЕ UI
-// ═══════════════════════════════
-let _upgTab = 'stats';  // ← добавьте эту строку
+
 // Кэш рейтинга
 var _ratingCache = null;
 var _ratingCacheTime = 0;
@@ -651,6 +699,7 @@ function renderStats() {
       <div class="stat-cell"><div class="stat-icon">${shieldSvg()}</div><div class="stat-label">Защита</div><div class="stat-val">${G.stats.def}</div></div>
       <div class="stat-cell"><div class="stat-icon">${windSvg()}</div><div class="stat-label">Скорость</div><div class="stat-val">${G.stats.spd}</div></div>
       <div class="stat-cell"><div class="stat-icon">${critSvg()}</div><div class="stat-label">Крит %</div><div class="stat-val">${G.stats.crit}%</div></div>
+      <div class="stat-cell"><div class="stat-icon">${critSvg()}</div><div class="stat-label">Сила крита</div><div class="stat-val">${effectiveCritDmg().toFixed(1)}x</div></div>
       <div class="stat-cell"><div class="stat-icon">${dodgeSvg()}</div><div class="stat-label">Уклон %</div><div class="stat-val">${G.stats.dodge}%</div></div>
       <div class="stat-cell"><div class="stat-icon">${heartSvg()}</div><div class="stat-label">Макс. HP</div><div class="stat-val">${G.maxHp}</div></div>
       <div class="stat-cell"><div class="stat-icon">${atkSpdSvg()}</div><div class="stat-label">Ск. атаки</div><div class="stat-val">${(G.stats.atkSpd||1).toFixed(2)}x</div></div>
@@ -923,10 +972,14 @@ function switchTab(tab) {
   var premBtn = document.querySelector('.prem-hud-btn');
   var taskBtn = document.getElementById('taskHudBtn');
   var bossBtn = document.getElementById('bossHudBtn');
+  var shopBtn = document.getElementById('marketHudBtn');
+  var pvpBtn  = document.getElementById('pvpHudBtn');
   if (bpBtn)   bpBtn.style.display   = isGame ? 'flex' : 'none';
   if (premBtn) premBtn.style.display = isGame ? 'flex' : 'none';
   if (taskBtn) taskBtn.style.display = isGame ? 'flex' : 'none';
   if (bossBtn) bossBtn.style.display = isGame ? 'flex' : 'none';
+  if (shopBtn) shopBtn.style.display = isGame ? 'flex' : 'none';
+  if (pvpBtn)  pvpBtn.style.display  = isGame ? 'flex' : 'none';
 
   if (tab === 'inv')      { _invSelectMode = false; _invSelected = {}; renderInventory(); }
   if (tab === 'upgrades') renderUpgrades();
@@ -1755,7 +1808,7 @@ function renderMarketListings(listings, isMy) {
     if (isMy) {
       actionBtn = '<button class="market-cancel-btn" onclick="cancelListing(\'' + lst.listingId + '\')">Снять</button>';
     } else {
-      var isSelf  = lst.sellerId === (window.GameSync && window.GameSync.getTgId ? window.GameSync.getTgId() : '');
+      var isSelf    = lst.sellerId === (window.GameSync && window.GameSync.getTgId ? window.GameSync.getTgId() : '');
       var canAfford = (G.pixr || 0) >= lst.price;
       actionBtn = '<button class="market-buy-btn" ' +
         (isSelf ? 'disabled title="Ваш лот"' : (!canAfford ? 'disabled title="Мало PIXR"' : '')) +
@@ -1802,11 +1855,11 @@ function buyListing(listingId, price) {
       window.GameSync.saveInstant();
     } else {
       var msgs = {
-        already_sold:      '❌ Кто-то успел купить раньше!',
-        not_enough_pixr:   '❌ Недостаточно PIXR',
-        listing_expired:   '❌ Лот истёк',
-        own_listing:       '❌ Нельзя купить свой лот',
-        market_locked:     '❌ Маркет не открыт',
+        already_sold:    '❌ Кто-то успел купить раньше!',
+        not_enough_pixr: '❌ Недостаточно PIXR',
+        listing_expired: '❌ Лот истёк',
+        own_listing:     '❌ Нельзя купить свой лот',
+        market_locked:   '❌ Маркет не открыт',
       };
       _taskToast(msgs[d.error] || '❌ Ошибка: ' + d.error);
       loadMarketListings();
@@ -1833,7 +1886,7 @@ function cancelListing(listingId) {
         if (typeof renderInventory === 'function') renderInventory();
       }
       loadMarketListings();
-      _taskToast('✅ Лот снят, предмет возвращён в инвентарь');
+      _taskToast('✅ Лот снят, предмет возвращён');
       window.GameSync.saveInstant();
     } else {
       _taskToast('❌ Ошибка: ' + d.error);
@@ -1846,7 +1899,8 @@ function cancelListing(listingId) {
 function confirmUnlockMarket() {
   var API  = window.GameSync._API;
   var init = window.GameSync._INIT;
-  document.querySelector('.market-unlock-btn').disabled = true;
+  var btn  = document.querySelector('.market-unlock-btn');
+  if (btn) btn.disabled = true;
   fetch(API + '/api/market/open', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -1854,7 +1908,7 @@ function confirmUnlockMarket() {
   })
   .then(function(r) { return r.json(); })
   .then(function(d) {
-    document.querySelector('.market-unlock-btn').disabled = false;
+    if (btn) btn.disabled = false;
     if (d.ok) {
       G.marketUnlocked = true;
       if (d.pixr !== undefined) G.pixr = d.pixr;
@@ -1863,14 +1917,12 @@ function confirmUnlockMarket() {
       _taskToast('🏪 Маркет открыт!');
       openMarket();
     } else {
-      var msgs = {
-        not_enough_pixr: '❌ Недостаточно PIXR (нужно 1000)',
-      };
+      var msgs = { not_enough_pixr: '❌ Недостаточно PIXR (нужно 1000)' };
       _taskToast(msgs[d.error] || '❌ Ошибка: ' + d.error);
     }
   })
   .catch(function() {
-    document.querySelector('.market-unlock-btn').disabled = false;
+    if (btn) btn.disabled = false;
     _taskToast('❌ Ошибка сети');
   });
 }
@@ -1898,13 +1950,12 @@ function openSellModal(itemId) {
   document.getElementById('sellCommissionNote').textContent = 'Вы получите: — PIXR (комиссия 10%)';
 
   input.oninput = function() {
-    var val = parseInt(input.value) || 0;
+    var val  = parseInt(input.value) || 0;
     var earn = val > 0 ? Math.floor(val * 0.9) : 0;
     document.getElementById('sellCommissionNote').textContent =
       'Вы получите: ' + (earn > 0 ? earn.toLocaleString() : '—') + ' PIXR (комиссия 10%)';
   };
 
-  // Закрыть item modal, открыть sell modal
   if (typeof closeItemModal === 'function') closeItemModal();
   document.getElementById('sellModal').classList.remove('hidden');
 }
@@ -1922,7 +1973,8 @@ function confirmSellItem() {
 
   var API  = window.GameSync._API;
   var init = window.GameSync._INIT;
-  document.querySelector('.sell-confirm-btn').disabled = true;
+  var btn  = document.querySelector('.sell-confirm-btn');
+  if (btn) btn.disabled = true;
 
   fetch(API + '/api/market/sell', {
     method: 'POST',
@@ -1931,7 +1983,7 @@ function confirmSellItem() {
   })
   .then(function(r) { return r.json(); })
   .then(function(d) {
-    document.querySelector('.sell-confirm-btn').disabled = false;
+    if (btn) btn.disabled = false;
     if (d.ok) {
       G.inventory = d.inventory;
       closeSellModal();
@@ -1940,36 +1992,271 @@ function confirmSellItem() {
       window.GameSync.saveInstant();
     } else {
       var msgs = {
-        max_lots:        '❌ Максимум 3 активных лота',
-        rarity_too_low:  '❌ Можно продавать только Необычный+',
-        item_equipped:   '❌ Сними предмет перед продажей',
-        item_not_found:  '❌ Предмет не найден',
-        market_locked:   '❌ Маркет не открыт',
+        max_lots:       '❌ Максимум 3 активных лота',
+        rarity_too_low: '❌ Только Необычный и выше',
+        item_equipped:  '❌ Сними предмет перед продажей',
+        item_not_found: '❌ Предмет не найден',
+        market_locked:  '❌ Маркет не открыт',
       };
       _taskToast(msgs[d.error] || '❌ Ошибка: ' + d.error);
     }
   })
   .catch(function() {
-    document.querySelector('.sell-confirm-btn').disabled = false;
+    if (btn) btn.disabled = false;
     _taskToast('❌ Ошибка сети');
   });
 }
 
-// ── Обработка уведомлений от сервера ──
-// Вешаем хук на polling (если уже есть обработчик — расширяем)
-(function() {
-  var _orig = window._handleMarketNotif;
-  window._handleMarketNotif = function(event, data) {
-    if (event === 'market_sold') {
-      _taskToast('💰 Продано: "' + data.itemName + '" за ' + data.earned + ' 💎 PIXR');
-      G.pixr = (G.pixr || 0) + data.earned;
-      window.GameSync.saveInstant();
-    } else if (event === 'market_expired') {
-      _taskToast('⏰ Лот истёк, "' + (data.item && data.item.name) + '" возвращён');
-      if (data.item) G.inventory.push(data.item);
-      if (typeof renderInventory === 'function') renderInventory();
-      window.GameSync.saveInstant();
-    }
-  };
-})();
+// ── Серверные уведомления ──
+window._handleMarketNotif = function(event, data) {
+  if (event === 'market_sold') {
+    _taskToast('💰 Продано: "' + data.itemName + '" +' + data.earned + ' 💎');
+    G.pixr = (G.pixr || 0) + data.earned;
+    window.GameSync.saveInstant();
+  } else if (event === 'market_expired') {
+    _taskToast('⏰ Лот истёк, "' + (data.item && data.item.name) + '" возвращён');
+    if (data.item) G.inventory.push(data.item);
+    if (typeof renderInventory === 'function') renderInventory();
+    window.GameSync.saveInstant();
+  }
+};
 
+
+// ═══════════════════════════════════════════════════════
+//  PvP — UI логика
+// ═══════════════════════════════════════════════════════
+
+var _pvpSearchTimer    = null;
+var _pvpSearchSeconds  = 0;
+var _pvpRoomId         = null;
+var _pvpYourIdx        = null;
+var _pvpSkillCooldowns = {};
+var _pvpOpponentName   = '';
+var _pvpConnected      = false;
+
+function openPvp() {
+  if (!_pvpConnected) {
+    var API  = window.GameSync._API;
+    var init = window.GameSync._INIT;
+    PvpClient.connect(API, init);
+    _pvpConnectHandlers();
+    _pvpConnected = true;
+  }
+  _pvpStartSearch();
+}
+
+function _pvpConnectHandlers() {
+  PvpClient.on('authed',         function() { console.log('✅ [pvp] authed'); });
+  PvpClient.on('error',          function(d) { _taskToast('❌ PvP: ' + (d.msg || 'ошибка')); _pvpHideSearch(); });
+  PvpClient.on('queued',         function() {});
+  PvpClient.on('timeout',        function() { _pvpHideSearch(); _taskToast('⏱ Соперник не найден'); });
+  PvpClient.on('queue_cancelled',function() { _pvpHideSearch(); });
+  PvpClient.on('matched', function(d) {
+    _pvpHideSearch();
+    _pvpRoomId = d.roomId; _pvpYourIdx = d.yourIdx; _pvpOpponentName = d.opponent.name;
+    _pvpStartBattle(d);
+  });
+  PvpClient.on('tick',       function(d) { _pvpOnTick(d); });
+  PvpClient.on('skill_used', function(d) { _pvpOnSkillUsed(d); });
+  PvpClient.on('skill_cd',   function()  { _taskToast('⏱ Навык ещё не готов'); });
+  PvpClient.on('end',        function(d) { _pvpOnEnd(d); });
+  PvpClient.on('opponent_disconnected', function() {
+    var el = document.getElementById('pvpStatusBadge');
+    if (el) el.textContent = '⚠️ ' + _pvpOpponentName + ' отключился...';
+  });
+  PvpClient.on('opponent_reconnected', function() {
+    var el = document.getElementById('pvpStatusBadge');
+    if (el) el.textContent = '';
+  });
+  PvpClient.on('reconnected', function(d) {
+    _pvpRoomId = d.roomId; _pvpYourIdx = d.yourIdx;
+    pvpRenderState.fighters[0].hp    = d.hp[0];
+    pvpRenderState.fighters[1].hp    = d.hp[1];
+    pvpRenderState.fighters[0].maxHp = d.maxHp[0];
+    pvpRenderState.fighters[1].maxHp = d.maxHp[1];
+  });
+  PvpClient.on('disconnected', function() {
+    var el = document.getElementById('pvpStatusBadge');
+    if (el) el.textContent = '🔄 Переподключение...';
+    setTimeout(function() { if (_pvpRoomId) PvpClient.reconnect(); }, 2000);
+  });
+}
+
+function _pvpStartSearch() {
+  _pvpSearchSeconds = 0;
+  var overlay = document.getElementById('pvpSearchOverlay');
+  if (overlay) overlay.classList.remove('hidden');
+  var cpEl = document.getElementById('pvpSearchCp');
+  if (cpEl) cpEl.textContent = 'Ваш CP: ' + calcCP();
+  _pvpSearchTimer = setInterval(function() {
+    _pvpSearchSeconds++;
+    var s = _pvpSearchSeconds % 60, m = Math.floor(_pvpSearchSeconds / 60);
+    var el = document.getElementById('pvpSearchTimer');
+    if (el) el.textContent = m + ':' + (s < 10 ? '0' : '') + s;
+    if (_pvpSearchSeconds >= 60) clearInterval(_pvpSearchTimer);
+  }, 1000);
+  PvpClient.joinQueue(calcCP());
+}
+
+function _pvpHideSearch() {
+  var overlay = document.getElementById('pvpSearchOverlay');
+  if (overlay) overlay.classList.add('hidden');
+  if (_pvpSearchTimer) { clearInterval(_pvpSearchTimer); _pvpSearchTimer = null; }
+}
+
+function pvpCancelSearch() {
+  PvpClient.cancelQueue();
+  _pvpHideSearch();
+}
+
+function _pvpStartBattle(d) {
+  var myCharId  = G_CHAR ? G_CHAR.id : 'fire';
+  var oppCharId = d.opponent.charId || 'fire';
+  pvpRenderState.active        = true;
+  pvpRenderState.yourIdx       = _pvpYourIdx;
+  pvpRenderState.lastTs        = performance.now();
+  pvpRenderState.floatingTexts = [];
+  pvpRenderState.fighters[0] = {
+    charId: _pvpYourIdx === 0 ? myCharId : oppCharId,
+    name:   _pvpYourIdx === 0 ? (G.firstName || 'Ты') : _pvpOpponentName,
+    arenaRating: _pvpYourIdx === 0 ? (G.arenaRating || 1000) : (d.opponent.arenaRating || 1000),
+    hp: d.maxHp[0], maxHp: d.maxHp[0], animTime: 0, state: 'fight', hitFlash: 0, buffs: {}, debuffs: {},
+  };
+  pvpRenderState.fighters[1] = {
+    charId: _pvpYourIdx === 1 ? myCharId : oppCharId,
+    name:   _pvpYourIdx === 1 ? (G.firstName || 'Ты') : _pvpOpponentName,
+    arenaRating: _pvpYourIdx === 1 ? (G.arenaRating || 1000) : (d.opponent.arenaRating || 1000),
+    hp: d.maxHp[1], maxHp: d.maxHp[1], animTime: 0, state: 'fight', hitFlash: 0, buffs: {}, debuffs: {},
+  };
+  _pvpSkillCooldowns = {};
+  var bo = document.getElementById('pvpBattleOverlay');
+  if (bo) bo.classList.remove('hidden');
+  _pvpBuildSkillsBar();
+  _taskToast('⚔️ Бой начался! vs ' + _pvpOpponentName);
+}
+
+function _pvpBuildSkillsBar() {
+  var bar = document.getElementById('pvpSkillsBar');
+  if (!bar || !G_CHAR) return;
+  var html = '';
+  (SKILLS_DEF[G_CHAR.id] || []).forEach(function(sk, i) {
+    if (!getSkillState(sk.id).unlocked) return;
+    html += '<button id="pvpSk' + i + '" class="pvp-skill-btn ready" onclick="pvpCastSkill(\'' + sk.id + '\',' + i + ')">' +
+      '<img src="' + sk.icon + '" style="width:28px;height:28px;object-fit:contain;image-rendering:pixelated;z-index:1;" onerror="this.remove()">' +
+      '<div id="pvpSkFill' + i + '" style="position:absolute;bottom:0;left:0;right:0;height:0%;background:rgba(0,0,0,0.65);"></div>' +
+      '<span id="pvpSkCd' + i + '" style="font-size:9px;color:#aaa;font-family:\'Courier New\',monospace;z-index:1;"></span>' +
+      '</button>';
+  });
+  bar.innerHTML = html;
+}
+
+function pvpCastSkill(skillId, idx) {
+  var now = Date.now(), last = _pvpSkillCooldowns[skillId] || 0;
+  var sk = null;
+  (SKILLS_DEF[G_CHAR && G_CHAR.id] || []).forEach(function(s) { if (s.id === skillId) sk = s; });
+  if (!sk) return;
+  var lv = (G.skills && G.skills[skillId] && G.skills[skillId].level) || 1;
+  var cd = Math.max(5, sk.cd * (1 - Math.min(lv,5)*0.05)) * 1000;
+  if (now - last < cd) { _taskToast('⏱ ' + sk.name + ' ещё не готов'); return; }
+  _pvpSkillCooldowns[skillId] = now;
+  _pvpUpdateSkillBtn(idx, cd / 1000);
+  PvpClient.castSkill(skillId);
+}
+
+function _pvpUpdateSkillBtn(idx, cdSec) {
+  var btn  = document.getElementById('pvpSk'     + idx);
+  var fill = document.getElementById('pvpSkFill' + idx);
+  var cdEl = document.getElementById('pvpSkCd'   + idx);
+  if (!btn) return;
+  btn.classList.remove('ready'); btn.classList.add('oncd');
+  var start = Date.now(), total = cdSec * 1000;
+  var iv = setInterval(function() {
+    var left = Math.max(0, total - (Date.now() - start));
+    if (fill) fill.style.height = ((left / total) * 100) + '%';
+    if (cdEl) cdEl.textContent  = left > 0 ? Math.ceil(left/1000) + 's' : '';
+    if (left <= 0) {
+      clearInterval(iv);
+      btn.classList.remove('oncd'); btn.classList.add('ready');
+      if (fill) fill.style.height = '0%';
+      if (cdEl) cdEl.textContent  = '';
+    }
+  }, 100);
+}
+
+function _pvpOnTick(d) {
+  var rs = pvpRenderState;
+  if (!rs.active) return;
+  var prev = [rs.fighters[0].hp, rs.fighters[1].hp];
+  rs.fighters[0].hp = d.hp[0]; rs.fighters[1].hp = d.hp[1];
+  rs.fighters[0].buffs   = d.buffs[0]   || {}; rs.fighters[1].buffs   = d.buffs[1]   || {};
+  rs.fighters[0].debuffs = d.debuffs[0] || {}; rs.fighters[1].debuffs = d.debuffs[1] || {};
+  (d.events || []).forEach(function(ev) {
+    if (ev.type === 'atk') {
+      var ti = 1 - ev.from;
+      if (ev.dodge) { pvpAddFloatText(ti, 'DODGE', '#2ef', false); }
+      else if (ev.dmg > 0) {
+        if (prev[ti] - d.hp[ti] > 0) rs.fighters[ti].hitFlash = 0.3;
+        pvpAddFloatText(ti, (ev.crit ? '💥' : '') + ev.dmg, ev.crit ? '#fff566' : '#ff6060', ev.crit);
+        rs.fighters[ev.from].state = 'atk';
+        setTimeout(function() { if (rs.fighters[ev.from]) rs.fighters[ev.from].state = 'fight'; }, 400);
+      }
+    } else if (ev.type === 'reflect') {
+      pvpAddFloatText(ev.from, '↩' + ev.dmg, '#aaffff', false);
+    }
+  });
+}
+
+function _pvpOnSkillUsed(d) {
+  var rs = pvpRenderState;
+  if (!rs.active) return;
+  rs.fighters[0].hp = d.hp[0]; rs.fighters[1].hp = d.hp[1];
+  var r = d.result; if (!r) return;
+  var ci = d.byIdx, ti = 1 - d.byIdx;
+  if (r.type === 'dmg')   { rs.fighters[ti].hitFlash = 0.4; pvpAddFloatText(ti, (r.crit?'💥':'⚡')+r.dmg, r.crit?'#fff566':'#a064ff', r.crit); }
+  else if (r.type==='smite')  { rs.fighters[ti].hitFlash=0.4; pvpAddFloatText(ti,'✨'+r.dmg,'#ffffaa',true); pvpAddFloatText(ci,'+'+r.heal+'❤','#44ff88',false); }
+  else if (r.type==='buff')   { var bl={haste:'⚡HASTE!',shield:'🛡SHIELD!',reflect:'↩REFLECT!',critup:'🎯CRIT UP!'}; pvpAddFloatText(ci,bl[r.effect]||r.effect.toUpperCase(),'#a064ff',false); }
+  else if (r.type==='debuff') { var dl={curse:'💀CURSE!',freeze:'❄FREEZE!'}; pvpAddFloatText(ti,dl[r.effect]||r.effect.toUpperCase(),'#cc44ff',false); }
+  rs.fighters[ci].state = 'atk';
+  setTimeout(function() { if (rs.fighters[ci]) rs.fighters[ci].state = 'fight'; }, 500);
+}
+
+function _pvpOnEnd(d) {
+  var isWinner = d.winnerIdx === _pvpYourIdx;
+  var myChange = d.ratingChange[isWinner ? d.winnerIdx : 1 - d.winnerIdx];
+  G.arenaRating = Math.max(0, (G.arenaRating || 1000) + myChange);
+  if (isWinner) G.pixr = (G.pixr || 0) + (d.pixrReward || 1);
+  if (window.GameSync) window.GameSync.saveInstant();
+  setTimeout(function() {
+    pvpRenderState.active = false;
+    var bo = document.getElementById('pvpBattleOverlay');
+    if (bo) bo.classList.add('hidden');
+    var rm = { killed: isWinner ? (_pvpOpponentName+' повержен') : 'Вы повержены', surrender: isWinner ? (_pvpOpponentName+' сдался') : 'Вы сдались', disconnect: isWinner ? (_pvpOpponentName+' отключился') : 'Вы отключились' };
+    var html =
+      '<div class="pvp-result-icon">'+(isWinner?'🏆':'💀')+'</div>'+
+      '<div class="pvp-result-title" style="color:'+(isWinner?'#ffd700':'#e74c3c')+';">'+(isWinner?'ПОБЕДА!':'ПОРАЖЕНИЕ')+'</div>'+
+      '<div class="pvp-result-sub">'+(rm[d.reason]||'')+'</div>'+
+      '<div class="pvp-result-stats">'+
+        '<div class="pvp-result-row"><span style="color:#778">Соперник</span><span>'+_pvpOpponentName+'</span></div>'+
+        '<div class="pvp-result-row"><span style="color:#778">Рейтинг</span><span style="color:'+(myChange>=0?'#2ecc71':'#e74c3c')+';">'+(myChange>=0?'+':'')+myChange+'</span></div>'+
+        '<div class="pvp-result-row"><span style="color:#778">Новый рейтинг</span><span style="color:#a78bfa;">★ '+(G.arenaRating||1000)+'</span></div>'+
+        (isWinner?'<div class="pvp-result-row"><span style="color:#778">Награда</span><span style="color:#ff44cc;">+'+(d.pixrReward||1)+' 💎 PIXR</span></div>':'')+
+      '</div>'+
+      '<button class="pvp-result-close" onclick="pvpCloseResult()">Закрыть</button>';
+    var box = document.getElementById('pvpResultBox');
+    if (box) box.innerHTML = html;
+    var modal = document.getElementById('pvpResultModal');
+    if (modal) modal.classList.remove('hidden');
+    updateHUD(); _pvpRoomId = null;
+  }, 800);
+}
+
+function pvpSurrender() {
+  if (!_pvpRoomId) return;
+  if (!confirm('Сдаться? Рейтинг снизится.')) return;
+  PvpClient.surrender();
+}
+
+function pvpCloseResult() {
+  var el = document.getElementById('pvpResultModal');
+  if (el) el.classList.add('hidden');
+}

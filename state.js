@@ -52,6 +52,7 @@ const G = {
   invFilter: 'all',
   boss: { floor: 1, lastFightTime: 0 }, // lastFightTime = timestamp победы (ms)
   marketUnlocked: false,
+  arenaRating: 1000,
 };
 
 // Базовые статы — отдельно, чтобы пересчитывать после снятия предметов
