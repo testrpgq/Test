@@ -2034,19 +2034,48 @@ var _pvpSkillCooldowns = {};
 var _pvpOpponentName   = '';
 var _pvpConnected      = false;
 
+var _pvpPendingSearch = false; // ждём авторизации перед поиском
+
 function openPvp() {
+  // Показываем оверлей поиска сразу
+  _pvpSearchSeconds = 0;
+  var overlay = document.getElementById('pvpSearchOverlay');
+  if (overlay) overlay.classList.remove('hidden');
+  var cpEl = document.getElementById('pvpSearchCp');
+  if (cpEl) cpEl.textContent = 'Ваш CP: ' + calcCP();
+
   if (!_pvpConnected) {
     var API  = window.GameSync._API;
     var init = window.GameSync._INIT;
+    _pvpPendingSearch = true;   // встанем в очередь как только придёт 'authed'
+    _pvpConnectHandlers();      // вешаем handlers ДО connect
     PvpClient.connect(API, init);
-    _pvpConnectHandlers();
     _pvpConnected = true;
+  } else if (PvpClient.isConnected()) {
+    _pvpDoJoinQueue();
+  } else {
+    // Уже подключались, но сокет переподключается
+    _pvpPendingSearch = true;
   }
-  _pvpStartSearch();
+}
+
+function _pvpDoJoinQueue() {
+  _pvpPendingSearch = false;
+  _pvpSearchTimer = setInterval(function() {
+    _pvpSearchSeconds++;
+    var s = _pvpSearchSeconds % 60, m = Math.floor(_pvpSearchSeconds / 60);
+    var el = document.getElementById('pvpSearchTimer');
+    if (el) el.textContent = m + ':' + (s < 10 ? '0' : '') + s;
+    if (_pvpSearchSeconds >= 60) clearInterval(_pvpSearchTimer);
+  }, 1000);
+  PvpClient.joinQueue(calcCP());
 }
 
 function _pvpConnectHandlers() {
-  PvpClient.on('authed',         function() { console.log('✅ [pvp] authed'); });
+  PvpClient.on('authed', function() {
+    console.log('✅ [pvp] authed');
+    if (_pvpPendingSearch) _pvpDoJoinQueue();
+  });
   PvpClient.on('error',          function(d) { _taskToast('❌ PvP: ' + (d.msg || 'ошибка')); _pvpHideSearch(); });
   PvpClient.on('queued',         function() {});
   PvpClient.on('timeout',        function() { _pvpHideSearch(); _taskToast('⏱ Соперник не найден'); });
@@ -2082,26 +2111,11 @@ function _pvpConnectHandlers() {
   });
 }
 
-function _pvpStartSearch() {
-  _pvpSearchSeconds = 0;
-  var overlay = document.getElementById('pvpSearchOverlay');
-  if (overlay) overlay.classList.remove('hidden');
-  var cpEl = document.getElementById('pvpSearchCp');
-  if (cpEl) cpEl.textContent = 'Ваш CP: ' + calcCP();
-  _pvpSearchTimer = setInterval(function() {
-    _pvpSearchSeconds++;
-    var s = _pvpSearchSeconds % 60, m = Math.floor(_pvpSearchSeconds / 60);
-    var el = document.getElementById('pvpSearchTimer');
-    if (el) el.textContent = m + ':' + (s < 10 ? '0' : '') + s;
-    if (_pvpSearchSeconds >= 60) clearInterval(_pvpSearchTimer);
-  }, 1000);
-  PvpClient.joinQueue(calcCP());
-}
-
 function _pvpHideSearch() {
   var overlay = document.getElementById('pvpSearchOverlay');
   if (overlay) overlay.classList.add('hidden');
   if (_pvpSearchTimer) { clearInterval(_pvpSearchTimer); _pvpSearchTimer = null; }
+  _pvpPendingSearch = false;
 }
 
 function pvpCancelSearch() {
