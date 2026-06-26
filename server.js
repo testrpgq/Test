@@ -1129,7 +1129,7 @@ app.post('/api/wallet/exchange', async (req, res) => {
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const WEBAPP_URL = process.env.WEBAPP_URL || 'https://your-domain.railway.app';
-const API_URL = process.env.API_URL || 'https://ghz-production.up.railway.app';
+const API_URL = process.env.API_URL || 'https://test-production-1fb6.up.railway.app';
 
 let bot = null;
 
