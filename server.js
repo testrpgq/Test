@@ -143,6 +143,23 @@ MarketListingSchema.index({ sellerId: 1, status: 1 });
 MarketListingSchema.index({ expiresAt: 1 });
 const MarketListing = mongoose.model('MarketListing', MarketListingSchema);
 
+// ── История PvP боёв ──
+const PvpBattleSchema = new mongoose.Schema({
+  winnerId:   { type: String, index: true },
+  winnerName: String,
+  loserId:    { type: String, index: true },
+  loserName:  String,
+  reason:     String,
+  winnerRatingAfter: Number,
+  loserRatingAfter:  Number,
+  ratingChange: Number,
+  createdAt:  { type: Number, default: Date.now, index: true },
+}, { minimize: false });
+PvpBattleSchema.index({ winnerId: 1, createdAt: -1 });
+PvpBattleSchema.index({ loserId:  1, createdAt: -1 });
+const PvpBattle = mongoose.model('PvpBattle', PvpBattleSchema);
+
+
 // Авто-истечение лотов каждые 10 минут
 setInterval(async () => {
   try {
@@ -2561,6 +2578,14 @@ async function pvpEndRoom(room, winIdx, reason) {
   try {
     await Save.findOneAndUpdate({tgId:winner.tgId},{$inc:{'data.pixr':PVP_REWARD_PIXR,'data.arenaRating':wg}});
     await Save.findOneAndUpdate({tgId:loser.tgId}, {$inc:{'data.arenaRating':-ll}});
+    await PvpBattle.create({
+      winnerId: winner.tgId, winnerName: winner.name,
+      loserId:  loser.tgId,  loserName:  loser.name,
+      reason,
+      winnerRatingAfter: wr + wg,
+      loserRatingAfter:  Math.max(0, lr - ll),
+      ratingChange: wg,
+    });
   } catch(e) { console.error('❌ [pvp] rating save:', e.message); }
   console.log(`🏆 [pvp] ${winner.tgId} победил ${loser.tgId} (${reason})`);
   pvpRooms.delete(room.roomId);
@@ -2716,6 +2741,26 @@ app.post('/api/pvp/rating', async (req, res) => {
   try {
     const top = await Save.find({},{'data.arenaRating':1,firstName:1,username:1}).sort({'data.arenaRating':-1}).limit(50).lean();
     const me  = await Save.findOne({tgId:tg.id},{'data.arenaRating':1}).lean();
-    res.json({ ok:true, top:top.map(function(u,i){return{rank:i+1,name:u.firstName||u.username||'Игрок',rating:u.data&&u.data.arenaRating||1000};}), myRating:me&&me.data&&me.data.arenaRating||1000 });
+    res.json({ ok:true, top:top.map(function(u,i){return{rank:i+1,name:u.firstName||u.username||'Игрок',rating:u.data&&u.data.arenaRating||1000,tgId:String(u.tgId||'')};}), myRating:me&&me.data&&me.data.arenaRating||1000 });
+  } catch(e) { res.status(500).json({ok:false,error:e.message}); }
+});
+
+app.post('/api/pvp/history', async (req, res) => {
+  const tg = authUser(req, res); if (!tg) return;
+  try {
+    const battles = await PvpBattle.find({
+      $or: [{ winnerId: String(tg.id) }, { loserId: String(tg.id) }]
+    }).sort({ createdAt: -1 }).limit(20).lean();
+    res.json({ ok: true, battles: battles.map(function(b) {
+      const isWin = b.winnerId === String(tg.id);
+      return {
+        result:      isWin ? 'win' : 'loss',
+        opponent:    isWin ? b.loserName : b.winnerName,
+        ratingChange: isWin ? b.ratingChange : -b.ratingChange,
+        ratingAfter: isWin ? b.winnerRatingAfter : b.loserRatingAfter,
+        reason:      b.reason,
+        createdAt:   b.createdAt,
+      };
+    })});
   } catch(e) { res.status(500).json({ok:false,error:e.message}); }
 });

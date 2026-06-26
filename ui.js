@@ -2033,28 +2033,134 @@ var _pvpYourIdx        = null;
 var _pvpSkillCooldowns = {};
 var _pvpOpponentName   = '';
 var _pvpConnected      = false;
+var _pvpPendingSearch  = false;
+var _pvpCurrentTab     = 'rating';
+var _pvpMyTgId         = null;
 
-var _pvpPendingSearch = false; // ждём авторизации перед поиском
-
+// ── Открыть страницу PvP ──
 function openPvp() {
-  // Показываем оверлей поиска сразу
+  document.getElementById('pvpPage').classList.remove('hidden');
+  var cpEl = document.getElementById('pvpFindCp');
+  if (cpEl) cpEl.textContent = 'Ваш CP: ' + calcCP();
+  var rEl = document.getElementById('pvpMyRating');
+  if (rEl) rEl.textContent = '★ ' + (G.arenaRating || 1000);
+
+  // Подключаемся к сокету если ещё нет
+  if (!_pvpConnected) {
+    _pvpConnectHandlers();
+    PvpClient.connect(window.GameSync._API, window.GameSync._INIT);
+    _pvpConnected = true;
+  }
+
+  switchPvpTab('rating');
+}
+
+function closePvpPage() {
+  document.getElementById('pvpPage').classList.add('hidden');
+}
+
+// ── Табы страницы ──
+function switchPvpTab(tab) {
+  _pvpCurrentTab = tab;
+  document.getElementById('pvpTabRating').classList.toggle('active',  tab === 'rating');
+  document.getElementById('pvpTabHistory').classList.toggle('active', tab === 'history');
+  if (tab === 'rating')  _pvpLoadRating();
+  if (tab === 'history') _pvpLoadHistory();
+}
+
+// ── Загрузить рейтинг ──
+function _pvpLoadRating() {
+  var body = document.getElementById('pvpPageBody');
+  body.innerHTML = '<div style="text-align:center;color:#445;padding:30px;">⏳ Загрузка...</div>';
+  var API = window.GameSync._API, init = window.GameSync._INIT;
+  fetch(API + '/api/pvp/rating', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ initData: init })
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    if (!d.ok) { body.innerHTML = '<div style="text-align:center;color:#445;padding:30px;">Ошибка</div>'; return; }
+    _pvpMyTgId = null; // определится по совпадению рейтинга
+    var myRating = d.myRating || 1000;
+    var el = document.getElementById('pvpMyRating');
+    if (el) el.textContent = '★ ' + myRating;
+
+    var html = '<div style="font-size:9px;color:#445;letter-spacing:1px;margin-bottom:8px;padding:0 2px;">ТОП ИГРОКОВ</div>';
+    if (!d.top || d.top.length === 0) {
+      html += '<div style="text-align:center;color:#445;padding:20px;">Пока нет игроков</div>';
+    } else {
+      d.top.forEach(function(u) {
+        var isMe = u.rating === myRating;
+        var medal = u.rank === 1 ? '🥇' : u.rank === 2 ? '🥈' : u.rank === 3 ? '🥉' : u.rank;
+        html += '<div class="pvp-rank-row' + (isMe ? ' me' : '') + '">' +
+          '<span class="pvp-rank-num">' + medal + '</span>' +
+          '<span class="pvp-rank-name">' + (isMe ? '👤 ' : '') + u.name + '</span>' +
+          '<span class="pvp-rank-val">★ ' + u.rating + '</span>' +
+        '</div>';
+      });
+    }
+    body.innerHTML = html;
+  })
+  .catch(function() { body.innerHTML = '<div style="text-align:center;color:#445;padding:30px;">Нет соединения</div>'; });
+}
+
+// ── Загрузить историю ──
+function _pvpLoadHistory() {
+  var body = document.getElementById('pvpPageBody');
+  body.innerHTML = '<div style="text-align:center;color:#445;padding:30px;">⏳ Загрузка...</div>';
+  var API = window.GameSync._API, init = window.GameSync._INIT;
+  fetch(API + '/api/pvp/history', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ initData: init })
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    if (!d.ok) { body.innerHTML = '<div style="text-align:center;color:#445;padding:30px;">Ошибка</div>'; return; }
+    if (!d.battles || d.battles.length === 0) {
+      body.innerHTML = '<div style="text-align:center;color:#445;padding:40px;">⚔️ Боёв ещё не было</div>';
+      return;
+    }
+    var reasonLabels = { killed: 'Убит', surrender: 'Сдался', disconnect: 'Отключился' };
+    var html = '<div style="font-size:9px;color:#445;letter-spacing:1px;margin-bottom:8px;padding:0 2px;">ПОСЛЕДНИЕ БОИ</div>';
+    d.battles.forEach(function(b) {
+      var isWin = b.result === 'win';
+      var change = b.ratingChange;
+      var date = new Date(b.createdAt);
+      var dateStr = date.getDate() + '.' + (date.getMonth()+1) + ' ' + date.getHours() + ':' + (date.getMinutes()<10?'0':'') + date.getMinutes();
+      html += '<div class="pvp-hist-row">' +
+        '<span class="pvp-hist-result ' + b.result + '">' + (isWin ? 'WIN' : 'LOSS') + '</span>' +
+        '<div style="flex:1;min-width:0;">' +
+          '<div class="pvp-hist-name">vs ' + b.opponent + '</div>' +
+          '<div style="font-size:9px;color:#445;">' + dateStr + ' · ' + (reasonLabels[b.reason]||b.reason) + '</div>' +
+        '</div>' +
+        '<div style="text-align:right;">' +
+          '<div class="pvp-hist-change" style="color:' + (change >= 0 ? '#2ecc71' : '#e74c3c') + ';">' + (change >= 0 ? '+' : '') + change + '</div>' +
+          '<div style="font-size:9px;color:#a78bfa;">★ ' + b.ratingAfter + '</div>' +
+        '</div>' +
+      '</div>';
+    });
+    body.innerHTML = html;
+  })
+  .catch(function() { body.innerHTML = '<div style="text-align:center;color:#445;padding:30px;">Нет соединения</div>'; });
+}
+
+// ── Начать поиск (кнопка на странице) ──
+function pvpStartFinding() {
+  var btn = document.getElementById('pvpFindBtn');
+  if (btn) btn.classList.add('searching');
+
+  // Показываем оверлей поиска
   _pvpSearchSeconds = 0;
   var overlay = document.getElementById('pvpSearchOverlay');
   if (overlay) overlay.classList.remove('hidden');
   var cpEl = document.getElementById('pvpSearchCp');
   if (cpEl) cpEl.textContent = 'Ваш CP: ' + calcCP();
 
-  if (!_pvpConnected) {
-    var API  = window.GameSync._API;
-    var init = window.GameSync._INIT;
-    _pvpPendingSearch = true;   // встанем в очередь как только придёт 'authed'
-    _pvpConnectHandlers();      // вешаем handlers ДО connect
-    PvpClient.connect(API, init);
-    _pvpConnected = true;
-  } else if (PvpClient.isConnected()) {
+  if (PvpClient.isConnected()) {
     _pvpDoJoinQueue();
   } else {
-    // Уже подключались, но сокет переподключается
     _pvpPendingSearch = true;
   }
 }
@@ -2071,24 +2177,50 @@ function _pvpDoJoinQueue() {
   PvpClient.joinQueue(calcCP());
 }
 
+function _pvpHideSearch() {
+  var overlay = document.getElementById('pvpSearchOverlay');
+  if (overlay) overlay.classList.add('hidden');
+  if (_pvpSearchTimer) { clearInterval(_pvpSearchTimer); _pvpSearchTimer = null; }
+  _pvpPendingSearch = false;
+  var btn = document.getElementById('pvpFindBtn');
+  if (btn) btn.classList.remove('searching');
+}
+
+// ── Отмена поиска ──
+function pvpCancelSearch() {
+  PvpClient.cancelQueue();
+  _pvpHideSearch();
+}
+
+// ── Подписка на события PvpClient ──
 function _pvpConnectHandlers() {
   PvpClient.on('authed', function() {
     console.log('✅ [pvp] authed');
     if (_pvpPendingSearch) _pvpDoJoinQueue();
   });
-  PvpClient.on('error',          function(d) { _taskToast('❌ PvP: ' + (d.msg || 'ошибка')); _pvpHideSearch(); });
-  PvpClient.on('queued',         function() {});
-  PvpClient.on('timeout',        function() { _pvpHideSearch(); _taskToast('⏱ Соперник не найден'); });
-  PvpClient.on('queue_cancelled',function() { _pvpHideSearch(); });
+  PvpClient.on('error', function(d) {
+    _taskToast('❌ PvP: ' + (d.msg || 'ошибка'));
+    _pvpHideSearch();
+  });
+  PvpClient.on('queued', function() {});
+  PvpClient.on('timeout', function() {
+    _pvpHideSearch();
+    _taskToast('⏱ Соперник не найден. Попробуй ещё!');
+  });
+  PvpClient.on('queue_cancelled', function() { _pvpHideSearch(); });
+
   PvpClient.on('matched', function(d) {
     _pvpHideSearch();
+    closePvpPage();
     _pvpRoomId = d.roomId; _pvpYourIdx = d.yourIdx; _pvpOpponentName = d.opponent.name;
     _pvpStartBattle(d);
   });
+
   PvpClient.on('tick',       function(d) { _pvpOnTick(d); });
   PvpClient.on('skill_used', function(d) { _pvpOnSkillUsed(d); });
   PvpClient.on('skill_cd',   function()  { _taskToast('⏱ Навык ещё не готов'); });
   PvpClient.on('end',        function(d) { _pvpOnEnd(d); });
+
   PvpClient.on('opponent_disconnected', function() {
     var el = document.getElementById('pvpStatusBadge');
     if (el) el.textContent = '⚠️ ' + _pvpOpponentName + ' отключился...';
@@ -2111,18 +2243,7 @@ function _pvpConnectHandlers() {
   });
 }
 
-function _pvpHideSearch() {
-  var overlay = document.getElementById('pvpSearchOverlay');
-  if (overlay) overlay.classList.add('hidden');
-  if (_pvpSearchTimer) { clearInterval(_pvpSearchTimer); _pvpSearchTimer = null; }
-  _pvpPendingSearch = false;
-}
-
-function pvpCancelSearch() {
-  PvpClient.cancelQueue();
-  _pvpHideSearch();
-}
-
+// ── Начало боя ──
 function _pvpStartBattle(d) {
   var myCharId  = G_CHAR ? G_CHAR.id : 'fire';
   var oppCharId = d.opponent.charId || 'fire';
@@ -2130,6 +2251,7 @@ function _pvpStartBattle(d) {
   pvpRenderState.yourIdx       = _pvpYourIdx;
   pvpRenderState.lastTs        = performance.now();
   pvpRenderState.floatingTexts = [];
+
   pvpRenderState.fighters[0] = {
     charId: _pvpYourIdx === 0 ? myCharId : oppCharId,
     name:   _pvpYourIdx === 0 ? (G.firstName || 'Ты') : _pvpOpponentName,
@@ -2142,13 +2264,17 @@ function _pvpStartBattle(d) {
     arenaRating: _pvpYourIdx === 1 ? (G.arenaRating || 1000) : (d.opponent.arenaRating || 1000),
     hp: d.maxHp[1], maxHp: d.maxHp[1], animTime: 0, state: 'fight', hitFlash: 0, buffs: {}, debuffs: {},
   };
+
   _pvpSkillCooldowns = {};
+  if (typeof pvpProjectiles !== 'undefined') pvpProjectiles = [];
+
   var bo = document.getElementById('pvpBattleOverlay');
   if (bo) bo.classList.remove('hidden');
   _pvpBuildSkillsBar();
   _taskToast('⚔️ Бой начался! vs ' + _pvpOpponentName);
 }
 
+// ── Панель навыков ──
 function _pvpBuildSkillsBar() {
   var bar = document.getElementById('pvpSkillsBar');
   if (!bar || !G_CHAR) return;
@@ -2159,11 +2285,12 @@ function _pvpBuildSkillsBar() {
       '<img src="' + sk.icon + '" style="width:28px;height:28px;object-fit:contain;image-rendering:pixelated;z-index:1;" onerror="this.remove()">' +
       '<div id="pvpSkFill' + i + '" style="position:absolute;bottom:0;left:0;right:0;height:0%;background:rgba(0,0,0,0.65);"></div>' +
       '<span id="pvpSkCd' + i + '" style="font-size:9px;color:#aaa;font-family:\'Courier New\',monospace;z-index:1;"></span>' +
-      '</button>';
+    '</button>';
   });
   bar.innerHTML = html;
 }
 
+// ── Каст навыка ──
 function pvpCastSkill(skillId, idx) {
   var now = Date.now(), last = _pvpSkillCooldowns[skillId] || 0;
   var sk = null;
@@ -2197,6 +2324,7 @@ function _pvpUpdateSkillBtn(idx, cdSec) {
   }, 100);
 }
 
+// ── Тик боя — обновляем HP и спавним снаряды ──
 function _pvpOnTick(d) {
   var rs = pvpRenderState;
   if (!rs.active) return;
@@ -2204,11 +2332,18 @@ function _pvpOnTick(d) {
   rs.fighters[0].hp = d.hp[0]; rs.fighters[1].hp = d.hp[1];
   rs.fighters[0].buffs   = d.buffs[0]   || {}; rs.fighters[1].buffs   = d.buffs[1]   || {};
   rs.fighters[0].debuffs = d.debuffs[0] || {}; rs.fighters[1].debuffs = d.debuffs[1] || {};
+
+  var charColors = { fire: '#ff6020', light: '#ffffaa', water: '#44aaff' };
+
   (d.events || []).forEach(function(ev) {
     if (ev.type === 'atk') {
       var ti = 1 - ev.from;
-      if (ev.dodge) { pvpAddFloatText(ti, 'DODGE', '#2ef', false); }
-      else if (ev.dmg > 0) {
+      if (ev.dodge) {
+        pvpAddFloatText(ti, 'DODGE', '#2ef', false);
+      } else if (ev.dmg > 0) {
+        // Снаряд автоатаки
+        var shooterChar = rs.fighters[ev.from].charId || 'fire';
+        if (typeof pvpSpawnProjectile === 'function') pvpSpawnProjectile(ev.from, charColors[shooterChar] || '#ffcc00');
         if (prev[ti] - d.hp[ti] > 0) rs.fighters[ti].hitFlash = 0.3;
         pvpAddFloatText(ti, (ev.crit ? '💥' : '') + ev.dmg, ev.crit ? '#fff566' : '#ff6060', ev.crit);
         rs.fighters[ev.from].state = 'atk';
@@ -2220,35 +2355,57 @@ function _pvpOnTick(d) {
   });
 }
 
+// ── Навык использован ──
 function _pvpOnSkillUsed(d) {
   var rs = pvpRenderState;
   if (!rs.active) return;
   rs.fighters[0].hp = d.hp[0]; rs.fighters[1].hp = d.hp[1];
   var r = d.result; if (!r) return;
   var ci = d.byIdx, ti = 1 - d.byIdx;
-  if (r.type === 'dmg')   { rs.fighters[ti].hitFlash = 0.4; pvpAddFloatText(ti, (r.crit?'💥':'⚡')+r.dmg, r.crit?'#fff566':'#a064ff', r.crit); }
+
+  var skillColors = {
+    fire_fireball: '#ff4400', fire_curse: '#cc44ff', fire_haste: '#ffff00',
+    light_smite: '#ffffaa', light_shield: '#88ddff', light_reflect: '#aaffff',
+    water_burst: '#44aaff', water_critup: '#00ffcc', water_freeze: '#88eeff',
+  };
+  var col = skillColors[d.skillId] || '#a064ff';
+
+  // Снаряд навыка
+  if ((r.type === 'dmg' || r.type === 'smite') && typeof pvpSpawnProjectile === 'function') {
+    pvpSpawnProjectile(ci, col);
+  }
+
+  if (r.type === 'dmg')   { rs.fighters[ti].hitFlash=0.4; pvpAddFloatText(ti,(r.crit?'💥':'⚡')+r.dmg,r.crit?'#fff566':col,r.crit); }
   else if (r.type==='smite')  { rs.fighters[ti].hitFlash=0.4; pvpAddFloatText(ti,'✨'+r.dmg,'#ffffaa',true); pvpAddFloatText(ci,'+'+r.heal+'❤','#44ff88',false); }
   else if (r.type==='buff')   { var bl={haste:'⚡HASTE!',shield:'🛡SHIELD!',reflect:'↩REFLECT!',critup:'🎯CRIT UP!'}; pvpAddFloatText(ci,bl[r.effect]||r.effect.toUpperCase(),'#a064ff',false); }
   else if (r.type==='debuff') { var dl={curse:'💀CURSE!',freeze:'❄FREEZE!'}; pvpAddFloatText(ti,dl[r.effect]||r.effect.toUpperCase(),'#cc44ff',false); }
+
   rs.fighters[ci].state = 'atk';
   setTimeout(function() { if (rs.fighters[ci]) rs.fighters[ci].state = 'fight'; }, 500);
 }
 
+// ── Конец боя ──
 function _pvpOnEnd(d) {
   var isWinner = d.winnerIdx === _pvpYourIdx;
   var myChange = d.ratingChange[isWinner ? d.winnerIdx : 1 - d.winnerIdx];
   G.arenaRating = Math.max(0, (G.arenaRating || 1000) + myChange);
   if (isWinner) G.pixr = (G.pixr || 0) + (d.pixrReward || 1);
   if (window.GameSync) window.GameSync.saveInstant();
+
   setTimeout(function() {
     pvpRenderState.active = false;
     var bo = document.getElementById('pvpBattleOverlay');
     if (bo) bo.classList.add('hidden');
-    var rm = { killed: isWinner ? (_pvpOpponentName+' повержен') : 'Вы повержены', surrender: isWinner ? (_pvpOpponentName+' сдался') : 'Вы сдались', disconnect: isWinner ? (_pvpOpponentName+' отключился') : 'Вы отключились' };
+
+    var reasonMap = {
+      killed:     isWinner ? (_pvpOpponentName+' повержен') : 'Вы повержены',
+      surrender:  isWinner ? (_pvpOpponentName+' сдался')   : 'Вы сдались',
+      disconnect: isWinner ? (_pvpOpponentName+' отключился') : 'Вы отключились',
+    };
     var html =
       '<div class="pvp-result-icon">'+(isWinner?'🏆':'💀')+'</div>'+
       '<div class="pvp-result-title" style="color:'+(isWinner?'#ffd700':'#e74c3c')+';">'+(isWinner?'ПОБЕДА!':'ПОРАЖЕНИЕ')+'</div>'+
-      '<div class="pvp-result-sub">'+(rm[d.reason]||'')+'</div>'+
+      '<div class="pvp-result-sub">'+(reasonMap[d.reason]||'')+'</div>'+
       '<div class="pvp-result-stats">'+
         '<div class="pvp-result-row"><span style="color:#778">Соперник</span><span>'+_pvpOpponentName+'</span></div>'+
         '<div class="pvp-result-row"><span style="color:#778">Рейтинг</span><span style="color:'+(myChange>=0?'#2ecc71':'#e74c3c')+';">'+(myChange>=0?'+':'')+myChange+'</span></div>'+
@@ -2256,10 +2413,12 @@ function _pvpOnEnd(d) {
         (isWinner?'<div class="pvp-result-row"><span style="color:#778">Награда</span><span style="color:#ff44cc;">+'+(d.pixrReward||1)+' 💎 PIXR</span></div>':'')+
       '</div>'+
       '<button class="pvp-result-close" onclick="pvpCloseResult()">Закрыть</button>';
+
     var box = document.getElementById('pvpResultBox');
     if (box) box.innerHTML = html;
     var modal = document.getElementById('pvpResultModal');
     if (modal) modal.classList.remove('hidden');
+
     updateHUD(); _pvpRoomId = null;
   }, 800);
 }
